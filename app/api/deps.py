@@ -1,7 +1,7 @@
 """Punto único de wiring entre routers y repositorios. Zonas y avisos ya
 resuelven contra la data layer real (app/repositories/warehouse/,
 2026-08-15) combinada con el store en memoria; usuarios, favoritos,
-consultas e informes resuelven contra SQLite (app/repositories/sqlite/,
+consultas e informes resuelven contra SQL (app/repositories/sql/,
 2026-08-15 también -- son datos que no pueden perderse en cada restart,
 a diferencia de catálogos/avisos sintéticos que se resiembran solos). Los
 routers solo conocen los Protocols de app/repositories/base.py, nunca las
@@ -32,12 +32,12 @@ from app.repositories.memory.repo import (
 from app.repositories.memory.seed import seed_all
 from app.repositories.memory.store import store
 from app.repositories.models import UserRow
-from app.repositories.sqlite.connection import init_db
-from app.repositories.sqlite.repo import (
-    FavoritesRepositorySQLite,
-    InquiriesRepositorySQLite,
-    ReportsRepositorySQLite,
-    UsersRepositorySQLite,
+from app.repositories.sql.connection import init_db, usa_postgres
+from app.repositories.sql.repo import (
+    FavoritesRepositorySql,
+    InquiriesRepositorySql,
+    ReportsRepositorySql,
+    UsersRepositorySql,
 )
 from app.repositories.warehouse.listings_source import ListingsRepositoryBlended
 from app.repositories.warehouse.zones_repo import WarehouseZonesRepository
@@ -45,7 +45,7 @@ from app.repositories.warehouse.zones_repo import WarehouseZonesRepository
 init_db()
 seed_all()
 
-_users_repo: UsersRepository = UsersRepositorySQLite()
+_users_repo: UsersRepository = UsersRepositorySql()
 # El catálogo en memoria es el fallback cuando el warehouse de data_layer no
 # está disponible (CI, clon nuevo): sin él las zonas quedan vacías y los avisos
 # del seed terminan en KeyError. Ver warehouse/zones_repo.py.
@@ -55,9 +55,9 @@ _zones_repo: ZonesRepository = WarehouseZonesRepository(
 _catalog_repo = CatalogRepositoryMemory(store)
 _listings_repo: ListingsRepository = ListingsRepositoryBlended(ListingsRepositoryMemory(store))
 _market_snapshots_repo = MarketSnapshotsRepositoryMemory(store)
-_inquiries_repo: InquiriesRepository = InquiriesRepositorySQLite()
-_favorites_repo: FavoritesRepository = FavoritesRepositorySQLite()
-_reports_repo: ReportsRepository = ReportsRepositorySQLite()
+_inquiries_repo: InquiriesRepository = InquiriesRepositorySql()
+_favorites_repo: FavoritesRepository = FavoritesRepositorySql()
+_reports_repo: ReportsRepository = ReportsRepositorySql()
 
 
 def get_users_repo() -> UsersRepository:

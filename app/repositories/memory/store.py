@@ -4,7 +4,7 @@ posible del contrato (app/repositories/base.py) para poder construir y
 probar la API ya, sin esperar a que la data layer real esté poblada.
 
 Usuarios, favoritos, consultas e informes ya NO viven acá -- se movieron a
-SQLite (app/repositories/sqlite/, 2026-08-15) porque son datos que no
+SQL (app/repositories/sql/, 2026-08-15) porque son datos que no
 pueden perderse en cada restart. Lo que queda acá es todo lo que se
 resiembra igual en cada arranque (catálogos, avisos sintéticos, histórico
 de mercado semilla) y no pierde nada al no persistir.

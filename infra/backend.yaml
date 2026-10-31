@@ -132,6 +132,22 @@ Resources:
         GenerateStringKey: password
         PasswordLength: 32
         ExcludeCharacters: '"@/\'' '
+  # Clave con que la API firma los JWT de sesión. Generada acá y leída por la
+  # app desde Secrets Manager (CUADRA_JWT_SECRET_ARN): si no, la app arranca con
+  # el default de desarrollo que está en el repositorio y cualquiera que lo lea
+  # puede firmarse un token válido para cualquier usuario. app/core/security.py
+  # se niega a arrancar en ese caso.
+  #
+  # Rotarla invalida todas las sesiones abiertas, así que no se rota sola.
+  AppJwtSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${Project}/${Environment}/jwt-signing-key'
+      Description: Clave de firma de los JWT de la API
+      GenerateSecretString:
+        PasswordLength: 64
+        ExcludePunctuation: true
+
   AppDbSecretAttachment:
     Type: AWS::SecretsManager::SecretTargetAttachment
     Properties:
@@ -169,13 +185,15 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
         - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
       Policies:
-        - PolicyName: leer-secreto-db
+        - PolicyName: leer-secretos
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource: !Ref AppDbSecret
+                Resource:
+                  - !Ref AppDbSecret
+                  - !Ref AppJwtSecret
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
@@ -209,12 +227,19 @@ Resources:
             mkdir -p /etc/alquileres
             cat > /etc/alquileres/app.env <<EOF
             APP_ENV=production
+            # PORT y ROOT_PATH las consume la unidad de systemd como flags de
+            # uvicorn (ver packer/files/alquileres-api.service), no la app: van
+            # sin prefijo a propósito.
             PORT=3000
             ROOT_PATH=/api
+            # Estándar de boto3, no de la app.
             AWS_REGION=${AWS::Region}
-            DB_SECRET_ARN=${AppDbSecret}
-            COGNITO_USER_POOL_ID=${UserPool}
-            COGNITO_CLIENT_ID=${UserPoolClient}
+            # Las que lee la app necesitan el prefijo CUADRA_: es el env_prefix
+            # de Settings en app/core/config.py. Sin el prefijo se ignoran, que
+            # es lo que pasaba antes con DB_SECRET_ARN -- la API quedaba con el
+            # SQLite local de cada instancia y la RDS sin usar.
+            CUADRA_DB_SECRET_ARN=${AppDbSecret}
+            CUADRA_JWT_SECRET_ARN=${AppJwtSecret}
             EOF
             systemctl restart alquileres-api
 
@@ -379,6 +404,10 @@ Outputs:
   DbEndpoint:
     Value: !GetAtt Database.Endpoint.Address
     Export: {Name: !Sub '${Project}-${Environment}-DbEndpoint'}
+  AppJwtSecretArn:
+    Description: Secreto con la clave de firma de los JWT (la app lo lee como CUADRA_JWT_SECRET_ARN)
+    Value: !Ref AppJwtSecret
+    Export: {Name: !Sub '${Project}-${Environment}-AppJwtSecretArn'}
   AppDbSecretArn:
     Value: !Ref AppDbSecret
     Export: {Name: !Sub '${Project}-${Environment}-AppDbSecretArn'}

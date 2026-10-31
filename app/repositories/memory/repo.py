@@ -13,7 +13,7 @@ from app.repositories.models import (
     PhotoRow,
     ZoneRow,
 )
-from app.repositories.sqlite.repo import count_inquiries_by_listing
+from app.repositories.sql.repo import count_inquiries_by_listing
 
 
 class ZonesRepositoryMemory:

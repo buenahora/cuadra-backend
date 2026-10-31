@@ -1,21 +1,27 @@
-"""Implementaciones SQLite de UsersRepository/FavoritesRepository/
+"""Implementaciones SQL de UsersRepository/FavoritesRepository/
 InquiriesRepository/ReportsRepository (app/repositories/base.py) -- mismo
 contrato que las versiones en memoria que reemplazan
 (app/repositories/memory/repo.py), así que app/api/deps.py es el único
-lugar que cambia al enchufarlas."""
+lugar que cambia al enchufarlas.
+
+Un solo juego de clases para SQLite y para Postgres: el SQL de acá es el
+dialecto común de los dos y el motor lo elige
+app/repositories/sql/connection.py según settings.db_secret_arn. Ver el
+docstring de ese módulo para por qué alcanza con una sola implementación.
+"""
 
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import date, datetime, timezone
+from typing import Any
 from uuid import UUID, uuid4
 
 from app.repositories.models import FavoriteRow, InquiryRow, ReportRow, UserRow
-from app.repositories.sqlite.connection import get_connection
+from app.repositories.sql.connection import get_connection
 
 
-def _row_to_user(row: sqlite3.Row) -> UserRow:
+def _row_to_user(row: dict[str, Any]) -> UserRow:
     return UserRow(
         id=UUID(row["id"]),
         nombre_completo=row["nombre_completo"],
@@ -28,7 +34,7 @@ def _row_to_user(row: sqlite3.Row) -> UserRow:
     )
 
 
-class UsersRepositorySQLite:
+class UsersRepositorySql:
     def create(
         self,
         nombre_completo: str,
@@ -71,7 +77,7 @@ class UsersRepositorySQLite:
         return _row_to_user(row) if row else None
 
 
-def _row_to_favorite(row: sqlite3.Row) -> FavoriteRow:
+def _row_to_favorite(row: dict[str, Any]) -> FavoriteRow:
     return FavoriteRow(
         user_id=UUID(row["user_id"]),
         listing_id=UUID(row["listing_id"]),
@@ -79,12 +85,13 @@ def _row_to_favorite(row: sqlite3.Row) -> FavoriteRow:
     )
 
 
-class FavoritesRepositorySQLite:
+class FavoritesRepositorySql:
     def add(self, user_id: UUID, listing_id: UUID) -> FavoriteRow:
         now = datetime.now(timezone.utc)
         with get_connection() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO favorites (user_id, listing_id, creado_en) VALUES (?, ?, ?)",
+                "INSERT INTO favorites (user_id, listing_id, creado_en) VALUES (?, ?, ?)"
+                " ON CONFLICT DO NOTHING",
                 (str(user_id), str(listing_id), now.isoformat()),
             )
             row = conn.execute(
@@ -94,12 +101,14 @@ class FavoritesRepositorySQLite:
         return _row_to_favorite(row)
 
     def remove(self, user_id: UUID, listing_id: UUID) -> bool:
+        # rowcount se lee adentro del with: una vez cerrada la conexión el
+        # cursor de pg8000 ya no responde.
         with get_connection() as conn:
-            cur = conn.execute(
+            borradas = conn.execute(
                 "DELETE FROM favorites WHERE user_id = ? AND listing_id = ?",
                 (str(user_id), str(listing_id)),
-            )
-        return cur.rowcount > 0
+            ).rowcount
+        return borradas > 0
 
     def list_by_user(self, user_id: UUID) -> list[FavoriteRow]:
         with get_connection() as conn:
@@ -117,7 +126,7 @@ class FavoritesRepositorySQLite:
         return row is not None
 
 
-def _row_to_inquiry(row: sqlite3.Row) -> InquiryRow:
+def _row_to_inquiry(row: dict[str, Any]) -> InquiryRow:
     return InquiryRow(
         id=UUID(row["id"]),
         listing_id=UUID(row["listing_id"]),
@@ -133,7 +142,7 @@ def _row_to_inquiry(row: sqlite3.Row) -> InquiryRow:
     )
 
 
-class InquiriesRepositorySQLite:
+class InquiriesRepositorySql:
     def create(self, listing_id: UUID, remitente_user_id: UUID, data: dict) -> InquiryRow:
         inquiry = InquiryRow(
             id=uuid4(),
@@ -203,7 +212,7 @@ def count_inquiries_by_listing(listing_id: UUID) -> int:
     return row["n"]
 
 
-def _row_to_report(row: sqlite3.Row) -> ReportRow:
+def _row_to_report(row: dict[str, Any]) -> ReportRow:
     return ReportRow(
         id=UUID(row["id"]),
         generado_por=UUID(row["generado_por"]),
@@ -218,7 +227,7 @@ def _row_to_report(row: sqlite3.Row) -> ReportRow:
     )
 
 
-class ReportsRepositorySQLite:
+class ReportsRepositorySql:
     def create(self, row: ReportRow) -> ReportRow:
         with get_connection() as conn:
             conn.execute(
