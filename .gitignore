@@ -12,7 +12,14 @@ app/data/*
 
 # Artefactos del CI (deploy.yml / Packer)
 build/
+build-bootstrap/
 app.tgz
-requirements.txt
+db-bootstrap.zip
+# Anclado a la raíz a propósito: lo que se ignora es el requirements.txt que
+# genera `uv export` en el deploy, no cualquiera. Sin la barra, el patrón
+# matchea a cualquier profundidad y se come
+# lambdas/db_bootstrap/requirements.txt, que sí va versionado -- eso rompió el
+# deploy del 2026-10-31 ("Could not open requirements file").
+/requirements.txt
 packer.log
 .DS_Store

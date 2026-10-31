@@ -1,0 +1,4 @@
+# Driver de Postgres para el bootstrap. pg8000 es Python puro: entra en el zip
+# del Lambda sin compilar nada. Mismo driver que usa la app
+# (app/repositories/sql/connection.py) y el job de Glue de cuadra-data.
+pg8000>=1.31,<2
