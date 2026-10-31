@@ -98,9 +98,16 @@ comprar el dominio, aceptando que el tráfico al ALB va sin TLS:
 Al cargar el certificado: poner `ORIGIN_CERTIFICATE_ARN`, volver a desplegar `base`
 con `AllowAlbHttp=false` y el backend. El listener vuelve a 443 solo y el 80 se cierra.
 
-**El `frontend` sí necesita dominio**: CloudFront se configura con `SITE_DOMAIN_NAME`
-y su certificado, y el build del frontend arma `VITE_API_BASE_URL` a partir de ese
-dominio.
+**El `frontend` tampoco necesita dominio.** Sin `SITE_DOMAIN_NAME`/`SITE_CERTIFICATE_ARN`,
+CloudFront sirve el sitio en su propio nombre (`dxxxx.cloudfront.net`) con el
+certificado que AWS mantiene y renueva, y el origen de `/api/*` pasa a ser el DNS del
+ALB directo (export `<proyecto>-<env>-AlbDnsName`) en vez de un CNAME `origin.<dominio>`.
+`VITE_API_BASE_URL` es relativa (`/api`), así que funciona igual en los dos modos.
+
+En ese modo el salto CloudFront -> ALB va **sin cifrar**, y con él el header secreto
+`X-Origin-Verify`. El security group del ALB solo acepta la prefix list de CloudFront,
+así que nadie más llega, pero el tramo viaja en claro: para producción de verdad hay
+que cargar los certificados.
 
 ## Orden del primer despliegue
 
@@ -123,9 +130,14 @@ dominio.
    `CfnExecutionRoleArn` como `CFN_EXEC_ROLE_ARN`.
 3. **backend**, desde su CI (el workflow construye la AMI con Packer antes del deploy).
 4. Cargar en el proveedor DNS el CNAME `origin.<dominio>` → output `AlbDnsName`.
-5. **Migración inicial**: crear el usuario `app_user` en Postgres con la contraseña del
-   secreto `alquileres/prd/db-app`. La rotación multi-usuario crea después el clon
-   `app_user_clone` sola.
+5. ~~**Migración inicial**: crear el usuario `app_user`.~~ Ya no hace falta: lo crea
+   el custom resource `DbBootstrap` del stack del backend, en cada create/update
+   (`lambdas/db_bootstrap/app.py`). Es el único componente que lee el secreto del
+   administrador de la RDS, corre dentro de la VPC porque la base está en subredes
+   privadas, y es idempotente -- si el rol ya existe le sincroniza la contraseña con
+   el secreto. El Auto Scaling Group depende de él: la app corre `init_db()` al
+   importar, así que sin el rol las instancias no pasan el health check. La rotación
+   multi-usuario crea después el clon `app_user_clone` sola.
 6. **frontend**, desde su CI. Cargar el CNAME `www.<dominio>` → output
    `DistributionDomainName`.
 7. **pipeline**, desde el CI de `cuadra-data`.

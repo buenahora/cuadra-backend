@@ -110,6 +110,29 @@ jobs:
           aws s3 cp app.tgz \
             "s3://${{ steps.base.outputs.artifacts_bucket }}/backend/${GITHUB_SHA}/app.tgz"
 
+      # El custom resource que crea app_user en Postgres. Va al mismo prefijo
+      # que app.tgz, y el stack lo referencia con CodeVersion=$GITHUB_SHA.
+      - name: Empaquetar el bootstrap de la DB
+        run: |
+          set -euo pipefail
+          rm -rf build-bootstrap && mkdir -p build-bootstrap
+          cp lambdas/db_bootstrap/app.py build-bootstrap/
+          pip install --quiet --target build-bootstrap -r lambdas/db_bootstrap/requirements.txt
+          find build-bootstrap -name '__pycache__' -type d -prune -exec rm -rf {} +
+          (cd build-bootstrap && zip -qr ../db-bootstrap.zip .)
+          # Una dependencia que falte no se nota al empaquetar: explota en el
+          # cold start, en medio del deploy del stack. Importarlo desde el zip
+          # armado lo detecta acá.
+          python -c "
+          import sys
+          sys.path.insert(0, 'build-bootstrap')
+          import app
+          assert app.handler
+          print('import del handler OK')
+          "
+          aws s3 cp db-bootstrap.zip \
+            "s3://${{ steps.base.outputs.artifacts_bucket }}/backend/${GITHUB_SHA}/db-bootstrap.zip"
+
       - uses: hashicorp/setup-packer@main
 
       - name: Construir la AMI con Packer
@@ -158,6 +181,7 @@ jobs:
               Project="$PROJECT" \
               Environment="$ENVIRONMENT" \
               AmiId="${{ steps.ami.outputs.id }}" \
+              CodeVersion="$GITHUB_SHA" \
               ${{ vars.ORIGIN_CERTIFICATE_ARN && format('OriginCertificateArn={0}', vars.ORIGIN_CERTIFICATE_ARN) || '' }} \
               ${{ vars.INSTANCE_TYPE && format('InstanceType={0}', vars.INSTANCE_TYPE) || '' }}
 

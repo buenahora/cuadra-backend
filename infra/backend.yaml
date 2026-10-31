@@ -32,6 +32,9 @@ Parameters:
   DbName:
     Type: String
     Default: alquileres
+  CodeVersion:
+    Type: String
+    Description: SHA del commit que se despliega. Prefijo de los artefactos en el bucket (backend/<sha>/...)
   RequestsPerTarget:
     Type: Number
     Default: 100
@@ -154,6 +157,78 @@ Resources:
       SecretId: !Ref AppDbSecret
       TargetId: !Ref Database
       TargetType: AWS::RDS::DBInstance
+  # ---------------------------------------------------------------- Bootstrap del usuario de la DB
+  # La RDS se crea con el administrador postgres_admin, y aparte existe el
+  # secreto de app_user -- pero nadie creaba app_user en la base. Era un paso
+  # manual del runbook, y hasta hacerlo la API y el job de Glue fallan con
+  # "password authentication failed". Esto lo hace solo. Ver
+  # lambdas/db_bootstrap/app.py.
+  DbBootstrapRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      # Para crear/borrar la ENI con la que entra a la VPC, y para los logs.
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: leer-secretos
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # El único componente que lee el secreto del administrador. Las
+              # instancias de la app solo leen el de app_user y el del JWT.
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !GetAtt Database.MasterUserSecret.SecretArn
+                  - !Ref AppDbSecret
+
+  DbBootstrapFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Project}-${Environment}-db-bootstrap'
+      Description: Crea el usuario de la aplicación en Postgres (custom resource)
+      Runtime: python3.12
+      Handler: app.handler
+      Timeout: 120
+      MemorySize: 256
+      Role: !GetAtt DbBootstrapRole.Arn
+      Code:
+        S3Bucket:
+          Fn::ImportValue: !Sub '${Project}-${Environment}-ArtifactsBucket'
+        S3Key: !Sub 'backend/${CodeVersion}/db-bootstrap.zip'
+      # Dentro de la VPC porque la RDS está en subredes privadas. Reutiliza el
+      # security group de la app: sus reglas de salida a la DB (5432) y a los
+      # VPC endpoints (443, para Secrets Manager) son exactamente las que hacen
+      # falta acá, así que no se agrega un SG más.
+      VpcConfig:
+        SubnetIds:
+          - Fn::ImportValue: !Sub '${Project}-${Environment}-AppSubnetA'
+          - Fn::ImportValue: !Sub '${Project}-${Environment}-AppSubnetB'
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub '${Project}-${Environment}-AppSG'
+      Environment:
+        Variables:
+          DB_NAME: !Ref DbName
+          MASTER_SECRET_ARN: !GetAtt Database.MasterUserSecret.SecretArn
+          APP_SECRET_ARN: !Ref AppDbSecret
+
+  DbBootstrap:
+    Type: AWS::CloudFormation::CustomResource
+    # Después del attachment: ahí es cuando el secreto de app_user ya tiene
+    # host/puerto de la instancia adentro.
+    DependsOn: AppDbSecretAttachment
+    Properties:
+      ServiceToken: !GetAtt DbBootstrapFunction.Arn
+      # Cambia en cada deploy, así el recurso se vuelve a ejecutar y mantiene
+      # la contraseña del rol sincronizada con el secreto.
+      Version: !Ref CodeVersion
+
   AppDbSecretRotation:
     Type: AWS::SecretsManager::RotationSchedule
     DependsOn: AppDbSecretAttachment
@@ -316,6 +391,10 @@ Resources:
   # ---------------------------------------------------------------- Auto Scaling
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
+    # La app corre init_db() al importar: si app_user todavía no existe, uvicorn
+    # no levanta, el health check falla y el instance refresh se cae. Así que
+    # las instancias arrancan después del bootstrap, no antes.
+    DependsOn: DbBootstrap
     Properties:
       AutoScalingGroupName: !Sub '${Project}-${Environment}-api'
       MinSize: '2'
