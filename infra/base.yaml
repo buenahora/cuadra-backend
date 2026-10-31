@@ -261,14 +261,23 @@ Resources:
   AlbSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
+      # Ojo: GroupDescription es inmutable. Cambiarla fuerza el reemplazo del
+      # security group, y su id esta exportado como <proyecto>-<env>-AlbSG.
       GroupDescription: ALB, 443 solo desde CloudFront
       VpcId: !Ref Vpc
+      # Una sola regla, y el puerto cambia con AllowAlbHttp. No se puede agregar
+      # una segunda regla para el 80: una regla que apunta a una prefix list no
+      # cuenta como 1 sino como la cantidad de entradas de la lista, y la de
+      # CloudFront tiene 49 contra un limite de 60 reglas por security group.
+      # Dos reglas dan "The maximum number of rules per security group has been
+      # reached". Tampoco hace falta: el ALB escucha en 443 o en 80, nunca en
+      # los dos (ver backend.yaml, parametro OriginCertificateArn).
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
+          FromPort: !If [PermitirAlbHttp, 80, 443]
+          ToPort: !If [PermitirAlbHttp, 80, 443]
           SourcePrefixListId: !Ref CloudFrontPrefixListId
-          Description: HTTPS desde CloudFront
+          Description: !If [PermitirAlbHttp, 'HTTP desde CloudFront (provisorio, sin certificado)', 'HTTPS desde CloudFront']
       SecurityGroupEgress:
         - {IpProtocol: icmp, FromPort: -1, ToPort: -1, CidrIp: 127.0.0.1/32}
       Tags: [{Key: Name, Value: !Sub '${Project}-${Environment}-sg-alb'}]
@@ -313,17 +322,6 @@ Resources:
         - {IpProtocol: icmp, FromPort: -1, ToPort: -1, CidrIp: 127.0.0.1/32}
       Tags: [{Key: Name, Value: !Sub '${Project}-${Environment}-sg-endpoints'}]
 
-  # Entrada HTTP al ALB, solo mientras no haya certificado (ver AllowAlbHttp).
-  AlbHttpIngress:
-    Type: AWS::EC2::SecurityGroupIngress
-    Condition: PermitirAlbHttp
-    Properties:
-      GroupId: !Ref AlbSG
-      IpProtocol: tcp
-      FromPort: 80
-      ToPort: 80
-      SourcePrefixListId: !Ref CloudFrontPrefixListId
-      Description: HTTP desde CloudFront (provisorio, sin certificado)
   # ALB -> App
   AlbToApp:
     Type: AWS::EC2::SecurityGroupEgress
