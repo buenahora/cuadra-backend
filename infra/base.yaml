@@ -26,6 +26,23 @@ Parameters:
   PipelineRepo:
     Type: String
     Description: Nombre del repo del pipeline de datos (sin la org)
+  # GitHub pasó a "immutable subject claims": en los repos creados desde 2025 el
+  # claim sub del token OIDC viene como repo:<org>@<orgId>/<repo>@<repoId>:ref:...
+  # en vez de repo:<org>/<repo>:ref:... Los roles de abajo aceptan las dos formas,
+  # así que estos ids son obligatorios. Sacarlos con:
+  #   gh api /users/<org> --jq .id      y      gh api /repos/<org>/<repo> --jq .id
+  GitHubOrgId:
+    Type: String
+    Description: Id numérico de la organización o usuario de GitHub
+  FrontendRepoId:
+    Type: String
+    Description: Id numérico del repo del frontend
+  BackendRepoId:
+    Type: String
+    Description: Id numérico del repo del backend
+  PipelineRepoId:
+    Type: String
+    Description: Id numérico del repo del pipeline de datos
   AlertEmail:
     Type: String
     Description: Mail del equipo para alertas y presupuesto
@@ -465,7 +482,13 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrg}/${FrontendRepo}:ref:refs/heads/main'
+              # Las dos formas del claim sub: la clásica y la inmutable (ver los
+              # parámetros *Id arriba). Así el rol sirve antes y después de que
+              # GitHub migre el repo, y sobrevive a un rename.
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub 'repo:${GitHubOrg}/${FrontendRepo}:ref:refs/heads/main'
+                  - !Sub 'repo:${GitHubOrg}@${GitHubOrgId}/${FrontendRepo}@${FrontendRepoId}:ref:refs/heads/main'
       Policies:
         - PolicyName: deploy
           PolicyDocument:
@@ -503,7 +526,13 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrg}/${BackendRepo}:ref:refs/heads/main'
+              # Las dos formas del claim sub: la clásica y la inmutable (ver los
+              # parámetros *Id arriba). Así el rol sirve antes y después de que
+              # GitHub migre el repo, y sobrevive a un rename.
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub 'repo:${GitHubOrg}/${BackendRepo}:ref:refs/heads/main'
+                  - !Sub 'repo:${GitHubOrg}@${GitHubOrgId}/${BackendRepo}@${BackendRepoId}:ref:refs/heads/main'
       Policies:
         - PolicyName: deploy
           PolicyDocument:
@@ -567,7 +596,13 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrg}/${PipelineRepo}:ref:refs/heads/main'
+              # Las dos formas del claim sub: la clásica y la inmutable (ver los
+              # parámetros *Id arriba). Así el rol sirve antes y después de que
+              # GitHub migre el repo, y sobrevive a un rename.
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub 'repo:${GitHubOrg}/${PipelineRepo}:ref:refs/heads/main'
+                  - !Sub 'repo:${GitHubOrg}@${GitHubOrgId}/${PipelineRepo}@${PipelineRepoId}:ref:refs/heads/main'
       Policies:
         - PolicyName: deploy
           PolicyDocument:
