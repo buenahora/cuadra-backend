@@ -26,6 +26,27 @@ Parameters:
     Type: String
     Default: ''
     Description: ARN del certificado ACM de origin.<dominio> (validado por DNS). Vacío = listener HTTP sin TLS
+  # La cuenta de AWS puede estar en el plan FREE, que no permite Multi-AZ ni
+  # retención de backups larga ("The specified backup retention period exceeds
+  # the maximum available to free tier customers"). Los defaults de acá son los
+  # de producción de verdad; para una cuenta con plan FREE hay que pasar
+  # MultiAZ=false y 1 día de retención. Ver "Cuenta con plan FREE" en el README.
+  DbMultiAZ:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: RDS en dos zonas de disponibilidad. false en cuentas con plan FREE
+  DbBackupRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 0
+    MaxValue: 35
+    Description: Días de retención de backups automáticos. El plan FREE solo admite valores chicos
+  DbDeletionProtection:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Protección contra borrado de la RDS y del user pool de Cognito. false permite bajar el stack sin pasos manuales
   DbInstanceClass:
     Type: String
     Default: db.t3.micro
@@ -41,6 +62,7 @@ Parameters:
     Description: Requests por instancia objetivo del escalado (ajustar con prueba de carga)
 
 Conditions:
+  ProtegerDeBorrado: !Equals [!Ref DbDeletionProtection, 'true']
   ConCertificado: !Not [!Equals [!Ref OriginCertificateArn, '']]
   SinCertificado: !Equals [!Ref OriginCertificateArn, '']
 
@@ -74,7 +96,11 @@ Resources:
           RequireUppercase: true
           RequireNumbers: true
           RequireSymbols: false
-      DeletionProtection: ACTIVE
+      # Mismo interruptor que la RDS. Con la protección activa, un create que
+      # falla deja el rollback trabado: CloudFormation no puede borrar el pool
+      # y el stack queda en ROLLBACK_FAILED, que hay que destrabar a mano
+      # desactivando la protección. Pasó el 2026-10-31.
+      DeletionProtection: !If [ProtegerDeBorrado, ACTIVE, INACTIVE]
   UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     Properties:
@@ -107,7 +133,7 @@ Resources:
       # Fijar EngineVersion (por ejemplo la última 16.x disponible) para evitar sorpresas
       DBInstanceClass: !Ref DbInstanceClass
       DBName: !Ref DbName
-      MultiAZ: true
+      MultiAZ: !Ref DbMultiAZ
       StorageType: gp3
       AllocatedStorage: '20'
       MaxAllocatedStorage: 100
@@ -118,8 +144,8 @@ Resources:
       VPCSecurityGroups:
         - Fn::ImportValue: !Sub '${Project}-${Environment}-DbSG'
       PubliclyAccessible: false
-      BackupRetentionPeriod: 7
-      DeletionProtection: true
+      BackupRetentionPeriod: !Ref DbBackupRetentionDays
+      DeletionProtection: !Ref DbDeletionProtection
       CopyTagsToSnapshot: true
       AutoMinorVersionUpgrade: true
 

@@ -182,6 +182,9 @@ jobs:
               Environment="$ENVIRONMENT" \
               AmiId="${{ steps.ami.outputs.id }}" \
               CodeVersion="$GITHUB_SHA" \
+              ${{ vars.DB_MULTI_AZ && format('DbMultiAZ={0}', vars.DB_MULTI_AZ) || '' }} \
+              ${{ vars.DB_BACKUP_RETENTION_DAYS && format('DbBackupRetentionDays={0}', vars.DB_BACKUP_RETENTION_DAYS) || '' }} \
+              ${{ vars.DB_DELETION_PROTECTION && format('DbDeletionProtection={0}', vars.DB_DELETION_PROTECTION) || '' }} \
               ${{ vars.ORIGIN_CERTIFICATE_ARN && format('OriginCertificateArn={0}', vars.ORIGIN_CERTIFICATE_ARN) || '' }} \
               ${{ vars.INSTANCE_TYPE && format('InstanceType={0}', vars.INSTANCE_TYPE) || '' }}
 

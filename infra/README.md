@@ -82,6 +82,48 @@ Para ver en qué forma está un repo:
 `gh api /repos/<org>/<repo>/actions/oidc/customization/sub`
 (un 404 significa que el repo es anterior a la función y usa la forma clásica).
 
+## Cuenta con plan FREE
+
+Chequear con `aws freetier get-account-plan-state`. Si devuelve
+`accountPlanType: FREE`, la cuenta tiene límites de plan (no solo de uso) y el
+stack del backend **no se crea con los defaults**: la RDS falla con
+`The specified backup retention period exceeds the maximum available to free
+tier customers` y el stack queda en `ROLLBACK_FAILED`.
+
+Variables a cargar en el repo del backend para ese caso:
+
+| Variable | Valor | Por qué |
+| --- | --- | --- |
+| `DB_MULTI_AZ` | `false` | Multi-AZ no entra en el plan FREE |
+| `DB_BACKUP_RETENTION_DAYS` | `1` | 7 excede el máximo del plan |
+| `DB_DELETION_PROTECTION` | `false` | Deja bajar el stack sin pasos manuales |
+
+Los defaults del template siguen siendo los de producción de verdad
+(Multi-AZ, 7 días de backup, protección activa): estas variables los bajan a
+propósito y solo en el repo donde se cargan.
+
+**La base queda en una sola zona y con un día de backup.** Sirve para probar;
+no es una base de producción. Antes de tratarla como tal hay que sacar estas
+variables y volver a desplegar.
+
+El plan FREE también bloquea otras cosas: `route53domains` no está disponible,
+por ejemplo. Y trae crédito limitado -- `accountPlanRemainingCredits` dice
+cuánto queda y `accountPlanExpirationDate` hasta cuándo.
+
+### Si un create falla y el rollback queda trabado
+
+Con `DB_DELETION_PROTECTION=true`, un create fallido deja el stack en
+`ROLLBACK_FAILED`: CloudFormation no puede borrar el user pool de Cognito ni la
+RDS. Para destrabarlo:
+
+```bash
+aws cognito-idp update-user-pool --user-pool-id <id> --deletion-protection INACTIVE
+aws cloudformation delete-stack --stack-name alquileres-<env>-backend
+```
+
+Con la variable en `false` esto no pasa, porque los dos recursos se crean sin
+protección.
+
 ## Sin dominio todavía
 
 Se puede desplegar `base` y `backend` y probar todo el pipeline de CI/CD **antes** de
