@@ -1,0 +1,82 @@
+# Stack base (red, security groups, SNS, bucket de artefactos, roles de OIDC).
+#
+# Manual a propósito: lo usan los tres repos, cambia muy poco y crear/actualizar
+# roles IAM con nombre pide permisos de admin que el rol de deploy del backend
+# no tiene. Necesita su propio secret AWS_BASE_DEPLOY_ROLE_ARN (un rol de OIDC
+# con permisos de admin, o correrlo a mano con un usuario admin siguiendo
+# infra/README.md).
+name: Deploy base
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_oidc_provider:
+        description: Crear el OIDC provider de GitHub (false si la cuenta ya lo tiene)
+        type: boolean
+        default: true
+
+concurrency:
+  group: deploy-base
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  PROJECT: ${{ vars.PROJECT || 'alquileres' }}
+  ENVIRONMENT: ${{ vars.ENVIRONMENT || 'prd' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Chequear configuración del repo
+        run: |
+          set -euo pipefail
+          faltan=()
+          [[ -n "${{ secrets.AWS_BASE_DEPLOY_ROLE_ARN }}" ]] || faltan+=("secret AWS_BASE_DEPLOY_ROLE_ARN")
+          [[ -n "${{ vars.GH_ORG }}" ]]                  || faltan+=("variable GH_ORG")
+          [[ -n "${{ vars.FRONTEND_REPO }}" ]]               || faltan+=("variable FRONTEND_REPO")
+          [[ -n "${{ vars.BACKEND_REPO }}" ]]                || faltan+=("variable BACKEND_REPO")
+          [[ -n "${{ vars.PIPELINE_REPO }}" ]]               || faltan+=("variable PIPELINE_REPO")
+          [[ -n "${{ vars.ALERT_EMAIL }}" ]]                 || faltan+=("variable ALERT_EMAIL")
+          if (( ${#faltan[@]} )); then
+            printf 'Falta configurar en este repo:\n'
+            printf '  - %s\n' "${faltan[@]}"
+            echo 'Ver infra/README.md.'
+            exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BASE_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: CloudFormation deploy (base)
+        run: |
+          set -euo pipefail
+          aws cloudformation deploy \
+            --stack-name "$PROJECT-$ENVIRONMENT-base" \
+            --template-file infra/base.yaml \
+            --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+            --no-fail-on-empty-changeset \
+            --tags Project="$PROJECT" Environment="$ENVIRONMENT" Repo=cuadra-backend \
+            --parameter-overrides \
+              Project="$PROJECT" \
+              Environment="$ENVIRONMENT" \
+              GitHubOrg="${{ vars.GH_ORG }}" \
+              FrontendRepo="${{ vars.FRONTEND_REPO }}" \
+              BackendRepo="${{ vars.BACKEND_REPO }}" \
+              PipelineRepo="${{ vars.PIPELINE_REPO }}" \
+              AlertEmail="${{ vars.ALERT_EMAIL }}" \
+              CreateGitHubOidcProvider="${{ inputs.create_oidc_provider }}"
+
+      - name: Outputs para configurar los repos
+        run: |
+          aws cloudformation describe-stacks --stack-name "$PROJECT-$ENVIRONMENT-base" \
+            --query 'Stacks[0].Outputs[?contains(OutputKey, `RoleArn`) || OutputKey==`ArtifactsBucketName`]' \
+            --output table

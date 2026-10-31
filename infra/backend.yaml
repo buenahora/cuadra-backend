@@ -1,0 +1,370 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::SecretsManager-2020-07-23
+Description: >
+  Backend de la plataforma de alquileres. Cognito, RDS PostgreSQL Multi-AZ con secretos
+  y rotación, ALB, Launch Template, Auto Scaling Group y alarmas. Lo despliega el CI del
+  repo del backend en cada versión, pasando la AMI nueva en AmiId.
+
+Parameters:
+  Project:
+    Type: String
+    Default: alquileres
+  Environment:
+    Type: String
+    Default: prd
+    AllowedValues: [dev, prd]
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: AMI generada por Packer para esta versión
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  OriginCertificateArn:
+    Type: String
+    Description: ARN del certificado ACM de origin.<dominio> (validado por DNS)
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+  DbName:
+    Type: String
+    Default: alquileres
+  RequestsPerTarget:
+    Type: Number
+    Default: 100
+    Description: Requests por instancia objetivo del escalado (ajustar con prueba de carga)
+
+Resources:
+  # ---------------------------------------------------------------- Header secreto CloudFront -> ALB
+  # El stack del frontend lee este secreto por nombre para agregar el header en CloudFront.
+  OriginVerifySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${Project}/${Environment}/origin-verify'
+      Description: Valor del header X-Origin-Verify que CloudFront agrega y el ALB valida
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: value
+        PasswordLength: 48
+        ExcludePunctuation: true
+
+  # ---------------------------------------------------------------- Cognito
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${Project}-${Environment}-users'
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      AccountRecoverySetting:
+        RecoveryMechanisms: [{Name: verified_email, Priority: 1}]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 10
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      DeletionProtection: ACTIVE
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub '${Project}-${Environment}-web'
+      GenerateSecret: false
+      ExplicitAuthFlows: [ALLOW_USER_SRP_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits: {AccessToken: hours, IdToken: hours, RefreshToken: days}
+
+  # ---------------------------------------------------------------- RDS
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets de la capa de datos
+      SubnetIds:
+        - Fn::ImportValue: !Sub '${Project}-${Environment}-DataSubnetA'
+        - Fn::ImportValue: !Sub '${Project}-${Environment}-DataSubnetB'
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${Project}-${Environment}-db'
+      Engine: postgres
+      # Fijar EngineVersion (por ejemplo la última 16.x disponible) para evitar sorpresas
+      DBInstanceClass: !Ref DbInstanceClass
+      DBName: !Ref DbName
+      MultiAZ: true
+      StorageType: gp3
+      AllocatedStorage: '20'
+      MaxAllocatedStorage: 100
+      StorageEncrypted: true
+      MasterUsername: postgres_admin
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - Fn::ImportValue: !Sub '${Project}-${Environment}-DbSG'
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 7
+      DeletionProtection: true
+      CopyTagsToSnapshot: true
+      AutoMinorVersionUpgrade: true
+
+  # Usuario de la aplicación, con permisos mínimos. La primera migración crea app_user
+  # en Postgres con la contraseña de este secreto (ver README).
+  AppDbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${Project}/${Environment}/db-app'
+      Description: Credenciales del usuario de la app en Postgres
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "app_user"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'' '
+  AppDbSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref AppDbSecret
+      TargetId: !Ref Database
+      TargetType: AWS::RDS::DBInstance
+  AppDbSecretRotation:
+    Type: AWS::SecretsManager::RotationSchedule
+    DependsOn: AppDbSecretAttachment
+    Properties:
+      SecretId: !Ref AppDbSecret
+      RotationRules: {AutomaticallyAfterDays: 30}
+      HostedRotationLambda:
+        RotationType: PostgreSQLMultiUser
+        RotationLambdaName: !Sub '${Project}-${Environment}-db-rotation'
+        MasterSecretArn: !GetAtt Database.MasterUserSecret.SecretArn
+        VpcSubnetIds: !Join
+          - ','
+          - - Fn::ImportValue: !Sub '${Project}-${Environment}-AppSubnetA'
+            - Fn::ImportValue: !Sub '${Project}-${Environment}-AppSubnetB'
+        VpcSecurityGroupIds:
+          Fn::ImportValue: !Sub '${Project}-${Environment}-RotationSG'
+
+  # ---------------------------------------------------------------- Instancias
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: leer-secreto-db
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref AppDbSecret
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${Project}-${Environment}-api'
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: {Arn: !GetAtt InstanceProfile.Arn}
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub '${Project}-${Environment}-AppSG'
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs: {VolumeSize: 16, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true}
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: [{Key: Name, Value: !Sub '${Project}-${Environment}-api'}]
+        # La AMI ya trae el código y el servicio systemd. El user data solo deja la
+        # configuración que depende del stack.
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            mkdir -p /etc/alquileres
+            cat > /etc/alquileres/app.env <<EOF
+            APP_ENV=production
+            PORT=3000
+            ROOT_PATH=/api
+            AWS_REGION=${AWS::Region}
+            DB_SECRET_ARN=${AppDbSecret}
+            COGNITO_USER_POOL_ID=${UserPool}
+            COGNITO_CLIENT_ID=${UserPoolClient}
+            EOF
+            systemctl restart alquileres-api
+
+  # ---------------------------------------------------------------- ALB
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${Project}-${Environment}-alb'
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - Fn::ImportValue: !Sub '${Project}-${Environment}-PublicSubnetA'
+        - Fn::ImportValue: !Sub '${Project}-${Environment}-PublicSubnetB'
+      SecurityGroups:
+        - Fn::ImportValue: !Sub '${Project}-${Environment}-AlbSG'
+      LoadBalancerAttributes:
+        - {Key: routing.http.drop_invalid_header_fields.enabled, Value: 'true'}
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${Project}-${Environment}-api'
+      VpcId:
+        Fn::ImportValue: !Sub '${Project}-${Environment}-VpcId'
+      Protocol: HTTP
+      Port: 3000
+      TargetType: instance
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - {Key: deregistration_delay.timeout_seconds, Value: '30'}
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates: [{CertificateArn: !Ref OriginCertificateArn}]
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig: {StatusCode: '403', ContentType: text/plain, MessageBody: Forbidden}
+  FromCloudFrontRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 1
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: X-Origin-Verify
+            Values:
+              - !Sub '{{resolve:secretsmanager:${OriginVerifySecret}:SecretString:value}}'
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ---------------------------------------------------------------- Auto Scaling
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub '${Project}-${Environment}-api'
+      MinSize: '2'
+      MaxSize: '4'
+      DesiredCapacity: '2'
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub '${Project}-${Environment}-AppSubnetA'
+        - Fn::ImportValue: !Sub '${Project}-${Environment}-AppSubnetB'
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      TargetGroupARNs: [!Ref TargetGroup]
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 120
+  RequestScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    DependsOn: FromCloudFrontRule
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        TargetValue: !Ref RequestsPerTarget
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Sub '${LoadBalancer.LoadBalancerFullName}/${TargetGroup.TargetGroupFullName}'
+
+  # ---------------------------------------------------------------- Alarmas
+  Target5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: La API devuelve errores 5xx
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - {Name: LoadBalancer, Value: !GetAtt LoadBalancer.LoadBalancerFullName}
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${Project}-${Environment}-AlertsTopicArn'
+  NoHealthyHostsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: El target group no tiene instancias sanas
+      Namespace: AWS/ApplicationELB
+      MetricName: HealthyHostCount
+      Dimensions:
+        - {Name: LoadBalancer, Value: !GetAtt LoadBalancer.LoadBalancerFullName}
+        - {Name: TargetGroup, Value: !GetAtt TargetGroup.TargetGroupFullName}
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${Project}-${Environment}-AlertsTopicArn'
+  DbCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: CPU alta en RDS
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - {Name: DBInstanceIdentifier, Value: !Ref Database}
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${Project}-${Environment}-AlertsTopicArn'
+
+Outputs:
+  AlbDnsName:
+    Description: Apuntar origin.<dominio> con un CNAME a este valor
+    Value: !GetAtt LoadBalancer.DNSName
+    Export: {Name: !Sub '${Project}-${Environment}-AlbDnsName'}
+  AutoScalingGroupName:
+    Value: !Ref AutoScalingGroup
+  DbInstanceId:
+    Value: !Ref Database
+  DbEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+    Export: {Name: !Sub '${Project}-${Environment}-DbEndpoint'}
+  AppDbSecretArn:
+    Value: !Ref AppDbSecret
+    Export: {Name: !Sub '${Project}-${Environment}-AppDbSecretArn'}
+  OriginVerifySecretName:
+    Value: !Sub '${Project}/${Environment}/origin-verify'
+    Export: {Name: !Sub '${Project}-${Environment}-OriginVerifySecretName'}
+  UserPoolId:
+    Value: !Ref UserPool
+    Export: {Name: !Sub '${Project}-${Environment}-UserPoolId'}
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+    Export: {Name: !Sub '${Project}-${Environment}-UserPoolClientId'}

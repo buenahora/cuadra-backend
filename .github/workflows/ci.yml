@@ -1,0 +1,31 @@
+# CI del backend: corre en cada PR y en cada rama que no sea main.
+# No toca AWS. El deploy real está en deploy.yml.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups
+      - run: uv run pytest -q
+
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install cfn-lint
+      - run: cfn-lint infra/base.yaml infra/backend.yaml
+      - uses: hashicorp/setup-packer@main
+      - run: packer init packer/api.pkr.hcl && packer validate -syntax-only packer/api.pkr.hcl

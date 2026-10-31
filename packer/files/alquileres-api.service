@@ -1,0 +1,30 @@
+[Unit]
+Description=API de Cuadra (FastAPI/uvicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alquileres
+Group=alquileres
+WorkingDirectory=/opt/alquileres/app
+
+# El "-" hace el archivo opcional: en el primer arranque systemd puede
+# levantar el servicio antes de que el user data lo escriba. Con Restart
+# siempre activo, el servicio entra solo cuando el archivo aparece y el
+# user data hace `systemctl restart`.
+EnvironmentFile=-/etc/alquileres/app.env
+
+# --root-path /api porque CloudFront le manda al ALB la ruta completa
+# (/api/...) sin reescribirla -- ver infra/frontend.yaml del repo del
+# frontend. El health check del ALB pega a /health, que sigue respondiendo.
+ExecStart=/bin/bash -c 'exec /opt/alquileres/venv/bin/uvicorn app.main:app \
+  --host 0.0.0.0 --port "${PORT:-3000}" --root-path "${ROOT_PATH:-/api}" \
+  --proxy-headers --forwarded-allow-ips="*"'
+
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

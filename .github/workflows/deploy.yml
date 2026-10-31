@@ -1,0 +1,183 @@
+# Deploy del backend a AWS (stack alquileres-<env>-backend).
+#
+# Pasos, en el orden del runbook (infra/README.md):
+#   1. tests
+#   2. empaquetar app + requirements y subir a s3://<artefactos>/backend/<sha>/app.tgz
+#   3. Packer construye la AMI con ese artefacto
+#   4. (opcional) snapshot de RDS antes de migrar
+#   5. cloudformation deploy de infra/backend.yaml con AmiId=<AMI nueva>  <-- la infra siempre se aplica acá
+#   6. instance refresh del ASG para que las instancias tomen la AMI nueva
+#
+# El stack base (infra/base.yaml) NO se despliega acá: tiene su propio
+# workflow manual (deploy-base.yml) porque necesita permisos de admin.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      snapshot_db:
+        description: Sacar snapshot de RDS antes de desplegar (usar cuando el deploy trae migraciones)
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  PROJECT: ${{ vars.PROJECT || 'alquileres' }}
+  ENVIRONMENT: ${{ vars.ENVIRONMENT || 'prd' }}
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups
+      - run: uv run pytest -q
+
+  deploy:
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Chequear configuración del repo
+        run: |
+          set -euo pipefail
+          faltan=()
+          [[ -n "${{ secrets.AWS_DEPLOY_ROLE_ARN }}" ]]    || faltan+=("secret AWS_DEPLOY_ROLE_ARN")
+          [[ -n "${{ secrets.CFN_EXEC_ROLE_ARN }}" ]]      || faltan+=("secret CFN_EXEC_ROLE_ARN")
+          [[ -n "${{ vars.ORIGIN_CERTIFICATE_ARN }}" ]]    || faltan+=("variable ORIGIN_CERTIFICATE_ARN")
+          if (( ${#faltan[@]} )); then
+            printf 'Falta configurar en este repo:\n'
+            printf '  - %s\n' "${faltan[@]}"
+            echo 'Ver infra/README.md.'
+            exit 1
+          fi
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Leer outputs del stack base
+        id: base
+        run: |
+          set -euo pipefail
+          outs=$(aws cloudformation describe-stacks \
+            --stack-name "$PROJECT-$ENVIRONMENT-base" \
+            --query 'Stacks[0].Outputs' --output json)
+          get() { echo "$outs" | jq -r --arg k "$1" '.[] | select(.OutputKey==$k) | .OutputValue'; }
+          echo "artifacts_bucket=$(get ArtifactsBucketName)"   >> "$GITHUB_OUTPUT"
+          echo "public_subnet_a=$(get PublicSubnetA)"          >> "$GITHUB_OUTPUT"
+          echo "packer_profile=$(get PackerInstanceProfileName)" >> "$GITHUB_OUTPUT"
+
+      # El artefacto lleva el código y el requirements.txt resuelto por uv.
+      # El venv lo arma Packer dentro de la AMI, con el Python de la instancia.
+      - name: Empaquetar la app
+        run: |
+          set -euo pipefail
+          uv export --no-dev --no-emit-project --no-hashes --format requirements-txt \
+            -o requirements.txt
+          rm -rf build && mkdir -p build
+          cp -R app requirements.txt build/
+          # Datos locales de desarrollo: no van a la AMI.
+          rm -f build/app/data/*.sqlite
+          rm -f build/app/static/reports/*.pdf
+          find build -name '__pycache__' -type d -prune -exec rm -rf {} +
+          tar -czf app.tgz -C build .
+          aws s3 cp app.tgz \
+            "s3://${{ steps.base.outputs.artifacts_bucket }}/backend/${GITHUB_SHA}/app.tgz"
+
+      - uses: hashicorp/setup-packer@main
+
+      - name: Construir la AMI con Packer
+        id: ami
+        run: |
+          set -euo pipefail
+          packer init packer/api.pkr.hcl
+          packer build -machine-readable \
+            -var "region=$AWS_REGION" \
+            -var "project=$PROJECT" \
+            -var "environment=$ENVIRONMENT" \
+            -var "subnet_id=${{ steps.base.outputs.public_subnet_a }}" \
+            -var "instance_profile=${{ steps.base.outputs.packer_profile }}" \
+            -var "artifacts_bucket=${{ steps.base.outputs.artifacts_bucket }}" \
+            -var "code_version=${GITHUB_SHA}" \
+            packer/api.pkr.hcl | tee packer.log
+          ami=$(grep 'artifact,0,id' packer.log | cut -d, -f6 | cut -d: -f2)
+          [[ -n "$ami" ]] || { echo 'Packer no devolvió un id de AMI'; exit 1; }
+          echo "id=$ami" >> "$GITHUB_OUTPUT"
+
+      # Una restauración de snapshot es la única salida si una migración sale
+      # mal, así que se saca antes del deploy, no después.
+      - name: Snapshot de RDS
+        if: inputs.snapshot_db
+        run: |
+          set -euo pipefail
+          db=$(aws cloudformation describe-stacks \
+            --stack-name "$PROJECT-$ENVIRONMENT-backend" \
+            --query 'Stacks[0].Outputs[?OutputKey==`DbInstanceId`].OutputValue' --output text)
+          snap="$PROJECT-$ENVIRONMENT-predeploy-$(date -u +%Y%m%d%H%M%S)"
+          aws rds create-db-snapshot --db-instance-identifier "$db" --db-snapshot-identifier "$snap"
+          aws rds wait db-snapshot-available --db-snapshot-identifier "$snap"
+
+      - name: CloudFormation deploy (backend)
+        run: |
+          set -euo pipefail
+          # CAPABILITY_AUTO_EXPAND por el transform de rotación de Secrets Manager.
+          aws cloudformation deploy \
+            --stack-name "$PROJECT-$ENVIRONMENT-backend" \
+            --template-file infra/backend.yaml \
+            --role-arn "${{ secrets.CFN_EXEC_ROLE_ARN }}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
+            --no-fail-on-empty-changeset \
+            --tags Project="$PROJECT" Environment="$ENVIRONMENT" Repo=cuadra-backend \
+            --parameter-overrides \
+              Project="$PROJECT" \
+              Environment="$ENVIRONMENT" \
+              AmiId="${{ steps.ami.outputs.id }}" \
+              OriginCertificateArn="${{ vars.ORIGIN_CERTIFICATE_ARN }}" \
+              ${{ vars.INSTANCE_TYPE && format('InstanceType={0}', vars.INSTANCE_TYPE) || '' }}
+
+      # El cambio de AMI en el launch template no reemplaza las instancias que
+      # ya están corriendo: eso lo hace el instance refresh.
+      - name: Instance refresh del ASG
+        run: |
+          set -euo pipefail
+          asg=$(aws cloudformation describe-stacks \
+            --stack-name "$PROJECT-$ENVIRONMENT-backend" \
+            --query 'Stacks[0].Outputs[?OutputKey==`AutoScalingGroupName`].OutputValue' --output text)
+          id=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name "$asg" \
+            --preferences MinHealthyPercentage=50 \
+            --query InstanceRefreshId --output text)
+          echo "Instance refresh $id en curso sobre $asg"
+          for _ in $(seq 1 60); do
+            estado=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$asg" --instance-refresh-ids "$id" \
+              --query 'InstanceRefreshes[0].Status' --output text)
+            echo "estado: $estado"
+            case "$estado" in
+              Successful) exit 0 ;;
+              Failed|Cancelled|RollbackSuccessful|RollbackFailed) exit 1 ;;
+            esac
+            sleep 30
+          done
+          echo 'El refresh no terminó en 30 min: revisar en la consola.'
+          exit 1

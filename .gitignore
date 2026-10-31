@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+app/static/uploads/*
+!app/static/uploads/.gitkeep
+app/static/reports/*
+!app/static/reports/.gitkeep
+app/data/*
+!app/data/.gitkeep
+.env
+
+# Artefactos del CI (deploy.yml / Packer)
+build/
+app.tgz
+requirements.txt
+packer.log
+.DS_Store
