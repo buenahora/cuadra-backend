@@ -11,10 +11,17 @@ hacen zones[listing.zone_id], ver app/api/routes/listings.py).
 Cachea en memoria de proceso tras la primera consulta -- se refresca con
 un restart, igual que el resto del store hoy (ver
 app/repositories/memory/store.py). No hace falta más que eso todavía.
+
+Si el warehouse no está (clon nuevo, CI, o antes de la primera corrida del
+pipeline de data_layer) cae al `fallback` que le pasan por constructor --
+en la práctica el catálogo sembrado en memoria. Devolver {} en ese caso
+rompía justamente el KeyError que este repositorio existe para evitar: los
+avisos del seed quedaban con un zone_id sin ZoneRow.
 """
 
 from __future__ import annotations
 
+from app.repositories.base import ZonesRepository
 from app.repositories.models import ZoneRow
 from app.repositories.warehouse.connection import get_warehouse_connection
 
@@ -39,15 +46,18 @@ _ZONES_QUERY = """
 
 
 class WarehouseZonesRepository:
-    def __init__(self) -> None:
+    def __init__(self, fallback: ZonesRepository | None = None) -> None:
         self._zones: dict[str, ZoneRow] | None = None
+        self._fallback = fallback
 
     def _load(self) -> dict[str, ZoneRow]:
         if self._zones is not None:
             return self._zones
         con = get_warehouse_connection()
         if con is None:
-            self._zones = {}
+            self._zones = (
+                {z.id: z for z in self._fallback.list_all()} if self._fallback else {}
+            )
             return self._zones
         rows = con.execute(_ZONES_QUERY).fetchall()
         self._zones = {

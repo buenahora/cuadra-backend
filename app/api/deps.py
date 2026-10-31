@@ -27,6 +27,7 @@ from app.repositories.memory.repo import (
     CatalogRepositoryMemory,
     ListingsRepositoryMemory,
     MarketSnapshotsRepositoryMemory,
+    ZonesRepositoryMemory,
 )
 from app.repositories.memory.seed import seed_all
 from app.repositories.memory.store import store
@@ -45,7 +46,12 @@ init_db()
 seed_all()
 
 _users_repo: UsersRepository = UsersRepositorySQLite()
-_zones_repo: ZonesRepository = WarehouseZonesRepository()
+# El catálogo en memoria es el fallback cuando el warehouse de data_layer no
+# está disponible (CI, clon nuevo): sin él las zonas quedan vacías y los avisos
+# del seed terminan en KeyError. Ver warehouse/zones_repo.py.
+_zones_repo: ZonesRepository = WarehouseZonesRepository(
+    fallback=ZonesRepositoryMemory(store)
+)
 _catalog_repo = CatalogRepositoryMemory(store)
 _listings_repo: ListingsRepository = ListingsRepositoryBlended(ListingsRepositoryMemory(store))
 _market_snapshots_repo = MarketSnapshotsRepositoryMemory(store)
