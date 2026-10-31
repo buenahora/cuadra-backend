@@ -14,6 +14,10 @@ on:
         description: Crear el OIDC provider de GitHub (false si la cuenta ya lo tiene)
         type: boolean
         default: true
+      allow_alb_http:
+        description: Abrir el puerto 80 del ALB (solo mientras no haya dominio ni certificado)
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-base
@@ -44,6 +48,13 @@ jobs:
           [[ -n "${{ vars.BACKEND_REPO }}" ]]                || faltan+=("variable BACKEND_REPO")
           [[ -n "${{ vars.PIPELINE_REPO }}" ]]               || faltan+=("variable PIPELINE_REPO")
           [[ -n "${{ vars.ALERT_EMAIL }}" ]]                 || faltan+=("variable ALERT_EMAIL")
+          # Ids numéricos de GitHub, para el claim sub inmutable del token OIDC
+          # (ver infra/base.yaml). Sacarlos con:
+          #   gh api /users/<org> --jq .id    y    gh api /repos/<org>/<repo> --jq .id
+          [[ -n "${{ vars.GH_ORG_ID }}" ]]                   || faltan+=("variable GH_ORG_ID")
+          [[ -n "${{ vars.FRONTEND_REPO_ID }}" ]]            || faltan+=("variable FRONTEND_REPO_ID")
+          [[ -n "${{ vars.BACKEND_REPO_ID }}" ]]             || faltan+=("variable BACKEND_REPO_ID")
+          [[ -n "${{ vars.PIPELINE_REPO_ID }}" ]]            || faltan+=("variable PIPELINE_REPO_ID")
           if (( ${#faltan[@]} )); then
             printf 'Falta configurar en este repo:\n'
             printf '  - %s\n' "${faltan[@]}"
@@ -73,6 +84,11 @@ jobs:
               BackendRepo="${{ vars.BACKEND_REPO }}" \
               PipelineRepo="${{ vars.PIPELINE_REPO }}" \
               AlertEmail="${{ vars.ALERT_EMAIL }}" \
+              GitHubOrgId="${{ vars.GH_ORG_ID }}" \
+              FrontendRepoId="${{ vars.FRONTEND_REPO_ID }}" \
+              BackendRepoId="${{ vars.BACKEND_REPO_ID }}" \
+              PipelineRepoId="${{ vars.PIPELINE_REPO_ID }}" \
+              AllowAlbHttp="${{ inputs.allow_alb_http }}" \
               CreateGitHubOidcProvider="${{ inputs.create_oidc_provider }}"
 
       - name: Outputs para configurar los repos

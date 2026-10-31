@@ -58,7 +58,13 @@ jobs:
           faltan=()
           [[ -n "${{ secrets.AWS_DEPLOY_ROLE_ARN }}" ]]    || faltan+=("secret AWS_DEPLOY_ROLE_ARN")
           [[ -n "${{ secrets.CFN_EXEC_ROLE_ARN }}" ]]      || faltan+=("secret CFN_EXEC_ROLE_ARN")
-          [[ -n "${{ vars.ORIGIN_CERTIFICATE_ARN }}" ]]    || faltan+=("variable ORIGIN_CERTIFICATE_ARN")
+          # ORIGIN_CERTIFICATE_ARN es opcional: sin dominio propio todavía no hay
+          # certificado ACM, y el ALB queda escuchando en 80 sin TLS (ver
+          # infra/backend.yaml, parámetro OriginCertificateArn). Avisar, no frenar.
+          if [[ -z "${{ vars.ORIGIN_CERTIFICATE_ARN }}" ]]; then
+            echo '!! sin ORIGIN_CERTIFICATE_ARN: el ALB va a escuchar en HTTP, sin TLS.'
+            echo '   Cargar la variable cuando el dominio y el certificado existan.'
+          fi
           if (( ${#faltan[@]} )); then
             printf 'Falta configurar en este repo:\n'
             printf '  - %s\n' "${faltan[@]}"
@@ -152,7 +158,7 @@ jobs:
               Project="$PROJECT" \
               Environment="$ENVIRONMENT" \
               AmiId="${{ steps.ami.outputs.id }}" \
-              OriginCertificateArn="${{ vars.ORIGIN_CERTIFICATE_ARN }}" \
+              ${{ vars.ORIGIN_CERTIFICATE_ARN && format('OriginCertificateArn={0}', vars.ORIGIN_CERTIFICATE_ARN) || '' }} \
               ${{ vars.INSTANCE_TYPE && format('InstanceType={0}', vars.INSTANCE_TYPE) || '' }}
 
       # El cambio de AMI en el launch template no reemplaza las instancias que

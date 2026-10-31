@@ -62,9 +62,19 @@ Parameters:
     Default: 'true'
     AllowedValues: ['true', 'false']
     Description: Poner false si la cuenta ya tiene el OIDC provider de GitHub
+  # Sin dominio propio no hay certificado ACM, y sin certificado el ALB no puede
+  # escuchar en 443. Esto abre el 80 del ALB para poder desplegar y probar el
+  # backend antes de comprar el dominio. Sigue limitado a la prefix list de
+  # CloudFront, igual que el 443. Volver a 'false' al poner el certificado.
+  AllowAlbHttp:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Abrir el puerto 80 del ALB (solo mientras no haya certificado)
 
 Conditions:
   CreateOidc: !Equals [!Ref CreateGitHubOidcProvider, 'true']
+  PermitirAlbHttp: !Equals [!Ref AllowAlbHttp, 'true']
 
 Resources:
   # ---------------------------------------------------------------- Red
@@ -303,6 +313,17 @@ Resources:
         - {IpProtocol: icmp, FromPort: -1, ToPort: -1, CidrIp: 127.0.0.1/32}
       Tags: [{Key: Name, Value: !Sub '${Project}-${Environment}-sg-endpoints'}]
 
+  # Entrada HTTP al ALB, solo mientras no haya certificado (ver AllowAlbHttp).
+  AlbHttpIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: PermitirAlbHttp
+    Properties:
+      GroupId: !Ref AlbSG
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourcePrefixListId: !Ref CloudFrontPrefixListId
+      Description: HTTP desde CloudFront (provisorio, sin certificado)
   # ALB -> App
   AlbToApp:
     Type: AWS::EC2::SecurityGroupEgress

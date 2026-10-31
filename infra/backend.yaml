@@ -19,9 +19,13 @@ Parameters:
   InstanceType:
     Type: String
     Default: t3.micro
+  # Vacío = todavía no hay dominio propio: el ALB escucha en 80 sin TLS en vez
+  # de 443. Sirve para probar el pipeline de deploy completo antes de comprar el
+  # dominio. Al cargar el certificado, el listener pasa a 443 solo.
   OriginCertificateArn:
     Type: String
-    Description: ARN del certificado ACM de origin.<dominio> (validado por DNS)
+    Default: ''
+    Description: ARN del certificado ACM de origin.<dominio> (validado por DNS). Vacío = listener HTTP sin TLS
   DbInstanceClass:
     Type: String
     Default: db.t3.micro
@@ -32,6 +36,10 @@ Parameters:
     Type: Number
     Default: 100
     Description: Requests por instancia objetivo del escalado (ajustar con prueba de carga)
+
+Conditions:
+  ConCertificado: !Not [!Equals [!Ref OriginCertificateArn, '']]
+  SinCertificado: !Equals [!Ref OriginCertificateArn, '']
 
 Resources:
   # ---------------------------------------------------------------- Header secreto CloudFront -> ALB
@@ -239,8 +247,13 @@ Resources:
       UnhealthyThresholdCount: 3
       TargetGroupAttributes:
         - {Key: deregistration_delay.timeout_seconds, Value: '30'}
+  # Uno de los dos, nunca los dos: con certificado va 443 con TLS, sin
+  # certificado va 80 en claro (ver el parámetro OriginCertificateArn). En los
+  # dos casos el default es 403: solo pasa el tráfico que trae el header
+  # secreto que agrega CloudFront, por la regla FromCloudFrontRule.
   HttpsListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: ConCertificado
     Properties:
       LoadBalancerArn: !Ref LoadBalancer
       Port: 443
@@ -250,10 +263,20 @@ Resources:
       DefaultActions:
         - Type: fixed-response
           FixedResponseConfig: {StatusCode: '403', ContentType: text/plain, MessageBody: Forbidden}
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: SinCertificado
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig: {StatusCode: '403', ContentType: text/plain, MessageBody: Forbidden}
   FromCloudFrontRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
-      ListenerArn: !Ref HttpsListener
+      ListenerArn: !If [ConCertificado, !Ref HttpsListener, !Ref HttpListener]
       Priority: 1
       Conditions:
         - Field: http-header

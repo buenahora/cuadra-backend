@@ -55,15 +55,52 @@ usando OIDC (sin claves) y despliegan con
 | `AWS_REGION` | los tres | `us-east-1` | región de todos los stacks |
 | `PROJECT` | los tres | `alquileres` | prefijo de stacks y exports |
 | `ENVIRONMENT` | los tres | `prd` | `dev` o `prd` |
-| `ORIGIN_CERTIFICATE_ARN` | backend | — | certificado ACM de `origin.<dominio>` (para el ALB) |
+| `ORIGIN_CERTIFICATE_ARN` | backend | — (opcional) | certificado ACM de `origin.<dominio>` para el ALB. **Vacío = el ALB escucha en 80 sin TLS**, ver "Sin dominio todavía" |
 | `INSTANCE_TYPE` | backend | `t3.micro` | opcional |
 | `SITE_DOMAIN_NAME` | frontend | — | dominio público, por ejemplo `www.<dominio>` |
 | `ORIGIN_DOMAIN_NAME` | frontend | — | `origin.<dominio>` (el CNAME al ALB) |
 | `SITE_CERTIFICATE_ARN` | frontend | — | certificado ACM de `SITE_DOMAIN_NAME`, en us-east-1 |
 | `SCHEDULE_EXPRESSION` | data | `cron(0 6 ? * MON *)` | opcional, cuándo corre el pipeline |
 | `GH_ORG`, `FRONTEND_REPO`, `BACKEND_REPO`, `PIPELINE_REPO`, `ALERT_EMAIL` | backend | — | solo para el workflow "Deploy base" |
+| `GH_ORG_ID`, `FRONTEND_REPO_ID`, `BACKEND_REPO_ID`, `PIPELINE_REPO_ID` | backend | — | ids numéricos de GitHub, para el claim `sub` inmutable del token OIDC. Solo para "Deploy base". Sacarlos con `gh api /users/<org> --jq .id` y `gh api /repos/<org>/<repo> --jq .id` |
 
 (`GH_ORG` y no `GITHUB_ORG`: GitHub reserva el prefijo `GITHUB_`.)
+
+### El claim `sub` inmutable de GitHub
+
+En los repos creados desde 2025, GitHub manda el claim `sub` del token OIDC como
+`repo:<org>@<orgId>/<repo>@<repoId>:ref:refs/heads/main`, no como
+`repo:<org>/<repo>:ref:refs/heads/main`. Una trust policy escrita solo para la forma
+clásica falla con **`Not authorized to perform sts:AssumeRoleWithWebIdentity`**, que
+parece un problema de permisos y en realidad es una comparación de strings que no da.
+
+Los tres roles de deploy de `base.yaml` aceptan las dos formas (`StringLike` con los
+dos strings), así que sirven antes y después de que GitHub migre un repo, y sobreviven
+a un rename. Por eso hacen falta las variables `*_REPO_ID` y `GH_ORG_ID`.
+
+Para ver en qué forma está un repo:
+`gh api /repos/<org>/<repo>/actions/oidc/customization/sub`
+(un 404 significa que el repo es anterior a la función y usa la forma clásica).
+
+## Sin dominio todavía
+
+Se puede desplegar `base` y `backend` y probar todo el pipeline de CI/CD **antes** de
+comprar el dominio, aceptando que el tráfico al ALB va sin TLS:
+
+- Dejar `ORIGIN_CERTIFICATE_ARN` sin cargar. `backend.yaml` crea un listener HTTP en
+  el puerto 80 en vez del HTTPS en 443 (parámetro `OriginCertificateArn` vacío).
+- Desplegar `base` con `AllowAlbHttp=true` (input `allow_alb_http` del workflow
+  "Deploy base"), que abre el 80 del `AlbSG`. Sigue restringido a la prefix list de
+  CloudFront, igual que el 443.
+- El default del listener es `403` en los dos modos: solo pasa el tráfico que trae el
+  header secreto `X-Origin-Verify` que agrega CloudFront.
+
+Al cargar el certificado: poner `ORIGIN_CERTIFICATE_ARN`, volver a desplegar `base`
+con `AllowAlbHttp=false` y el backend. El listener vuelve a 443 solo y el 80 se cierra.
+
+**El `frontend` sí necesita dominio**: CloudFront se configura con `SITE_DOMAIN_NAME`
+y su certificado, y el build del frontend arma `VITE_API_BASE_URL` a partir de ese
+dominio.
 
 ## Orden del primer despliegue
 
@@ -93,7 +130,18 @@ usando OIDC (sin claves) y despliegan con
    `DistributionDomainName`.
 7. **pipeline**, desde el CI de `cuadra-data`.
 
-Después de eso, cada repo despliega por su cuenta en el orden que quiera.
+Este orden no es una sugerencia: hay dependencias duras entre stacks.
+`infra/pipeline.yaml` importa `alquileres-<env>-AppDbSecretArn`, que exporta el stack
+del backend, así que **`pipeline` no puede crearse antes que `backend`**. Si se lanza
+antes, muere al instante con `No export named alquileres-<env>-AppDbSecretArn found` y
+queda en `ROLLBACK_COMPLETE`: hay que borrar esa carcasa con `delete-stack` antes de
+reintentar. El `frontend` lee del backend los outputs de Cognito en tiempo de build.
+
+Ojo: el paso "Chequear configuración del repo" de cada workflow mira solo **sus
+propios** secrets y variables. Un repo puede pasar ese chequeo y fallar igual por un
+export que todavía no existe.
+
+Después del primer despliegue completo, cada repo despliega por su cuenta.
 
 ## Qué hace cada CI
 
