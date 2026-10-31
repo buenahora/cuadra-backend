@@ -55,11 +55,18 @@ def _responder(event, context, estado: str, motivo: str = "") -> None:
     urllib.request.urlopen(peticion).read()
 
 
-def _crear_usuario(maestro: dict, app: dict, base: str) -> str:
+def _crear_usuario(maestro: dict, app: dict, base: str, host: str, port: int) -> str:
+    """`maestro` y `app` solo aportan usuario y contraseña.
+
+    El secreto que AWS genera con ManageMasterUserPassword trae **solo**
+    username y password: no incluye host, port ni dbname (a diferencia del
+    secreto de app_user, al que SecretTargetAttachment sí le agrega la conexión).
+    Por eso el endpoint llega aparte, desde el template.
+    """
     usuario = app["username"]
     conn = pg8000.dbapi.connect(
-        host=maestro["host"],
-        port=int(maestro.get("port", 5432)),
+        host=host,
+        port=port,
         database=base,
         user=maestro["username"],
         password=maestro["password"],
@@ -113,6 +120,8 @@ def handler(event, context):
             _secreto(os.environ["MASTER_SECRET_ARN"]),
             _secreto(os.environ["APP_SECRET_ARN"]),
             base,
+            os.environ["DB_HOST"],
+            int(os.environ.get("DB_PORT", "5432")),
         )
         _responder(event, context, "SUCCESS", accion)
     except Exception as e:  # noqa: BLE001 -- hay que responderle a CloudFormation igual

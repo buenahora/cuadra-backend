@@ -241,6 +241,10 @@ Resources:
       Environment:
         Variables:
           DB_NAME: !Ref DbName
+          # El secreto que AWS genera para el master trae solo usuario y
+          # contraseña, sin host ni puerto, así que el endpoint va aparte.
+          DB_HOST: !GetAtt Database.Endpoint.Address
+          DB_PORT: !GetAtt Database.Endpoint.Port
           MASTER_SECRET_ARN: !GetAtt Database.MasterUserSecret.SecretArn
           APP_SECRET_ARN: !Ref AppDbSecret
 
