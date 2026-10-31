@@ -600,6 +600,16 @@ Resources:
                   - ec2:ModifyImageAttribute
                   - ec2:GetPasswordData
                 Resource: '*'
+              # Packer valida el perfil de instancia antes de lanzar la
+              # instancia de build (iam_instance_profile en
+              # packer/api.pkr.hcl), así que necesita poder leerlo. Sin esto
+              # falla en 3 segundos con "Couldn't find specified instance
+              # profile ... AccessDenied". El iam:PassRole del rol que lleva
+              # adentro ya está más arriba.
+              - Sid: PackerPerfilDeInstancia
+                Effect: Allow
+                Action: iam:GetInstanceProfile
+                Resource: !GetAtt PackerInstanceProfile.Arn
 
   PipelineDeployRole:
     Type: AWS::IAM::Role
