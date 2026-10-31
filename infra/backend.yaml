@@ -337,8 +337,16 @@ Resources:
             # sin prefijo a propósito.
             PORT=3000
             ROOT_PATH=/api
-            # Estándar de boto3, no de la app.
+            # Las dos: botocore resuelve la región de AWS_DEFAULT_REGION y NO
+            # de AWS_REGION. Con solo la segunda puesta, la app moría al
+            # arrancar con NoRegionError teniendo la variable a la vista.
+            # CUADRA_AWS_REGION es la que lee Settings y la que la app pasa
+            # explícita a boto3 (app/core/secrets.py), así que es la que
+            # realmente importa; las otras dos quedan para el awscli de la
+            # máquina y para cualquier otro cliente.
             AWS_REGION=${AWS::Region}
+            AWS_DEFAULT_REGION=${AWS::Region}
+            CUADRA_AWS_REGION=${AWS::Region}
             # Las que lee la app necesitan el prefijo CUADRA_: es el env_prefix
             # de Settings en app/core/config.py. Sin el prefijo se ignoran, que
             # es lo que pasaba antes con DB_SECRET_ARN -- la API quedaba con el
