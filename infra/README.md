@@ -122,12 +122,16 @@ Después de eso, cada repo despliega por su cuenta en el orden que quiera.
 
 **Data layer** (`cuadra-data/.github/workflows/deploy.yml`)
 1. Tests de los extractores y del pipeline con datos de ejemplo.
-2. Zip de las Lambdas (uno solo, subido con los tres nombres: la fuente la elige
-   la env var `FUENTE`), `glue/transform.py` y `deps.zip` (pg8000) a
-   `s3://<artefactos>/pipeline/<sha>/`.
+2. Zip de la Lambda de scraping (extractor + handler + dependencias),
+   `glue/transform.py` y `deps.zip` (pg8000) a `s3://<artefactos>/pipeline/<sha>/`,
+   después de importar el handler desde el zip para que una dependencia que
+   falte no aparezca recién en la primera corrida.
 3. `aws cloudformation deploy` de `pipeline.yaml` con `CodeVersion=<sha>`.
 4. Opcional (`workflow_dispatch` con `correr_validacion`):
    `aws stepfunctions start-execution` para validar el cambio sin esperar al cron.
+
+Hoy el pipeline tiene una sola fuente conectada (InfoCasas). El contrato que
+tiene que cumplir una fuente nueva está en `cuadra-data/infra/README.md`.
 
 ## Notas
 
@@ -140,8 +144,9 @@ Después de eso, cada repo despliega por su cuenta en el orden que quiera.
   conviene acotarlo.
 - Los roles de OIDC solo confían en `ref:refs/heads/main` de cada repo: los deploys
   desde otra rama no pueden asumirlos (los workflows de CI no lo intentan).
-- La tabla `avisos` del catálogo de Glue es un esquema de ejemplo: ajustarlo a lo que
-  escriba el job.
+- La tabla `avisos` del catálogo de Glue tiene las columnas del contrato de bronze,
+  las mismas que escribe `glue/transform.py`. Si el contrato cambia, se mueven
+  juntos (ver `cuadra-data/infra/README.md`).
 - El Scheduler no puede darle a la ejecución un nombre por fecha (los nombres no admiten
   `:`). La idempotencia la da la fecha calculada en el primer estado: todas las
   escrituras la usan en sus claves, así que relanzar la misma semana pisa los mismos
