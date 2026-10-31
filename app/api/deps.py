@@ -39,21 +39,39 @@ from app.repositories.sql.repo import (
     ReportsRepositorySql,
     UsersRepositorySql,
 )
-from app.repositories.warehouse.listings_source import ListingsRepositoryBlended
+from app.repositories.sql.gold import GoldZonesRepository, filas_de_market_listings
+from app.repositories.warehouse.listings_source import (
+    ListingsRepositoryBlended,
+    filas_del_warehouse,
+)
 from app.repositories.warehouse.zones_repo import WarehouseZonesRepository
 
 init_db()
 seed_all()
 
 _users_repo: UsersRepository = UsersRepositorySql()
-# El catálogo en memoria es el fallback cuando el warehouse de data_layer no
-# está disponible (CI, clon nuevo): sin él las zonas quedan vacías y los avisos
-# del seed terminan en KeyError. Ver warehouse/zones_repo.py.
-_zones_repo: ZonesRepository = WarehouseZonesRepository(
-    fallback=ZonesRepositoryMemory(store)
-)
+# De dónde salen los avisos scrapeados y el catálogo de zonas depende del
+# entorno, no del código de las rutas:
+#
+#   AWS      -> las tablas gold que el job de Glue construye en Postgres
+#               (market_listings, zonas). Ver app/repositories/sql/gold.py.
+#   local    -> el warehouse DuckDB que arma dbt en cuadra-data, como siempre.
+#
+# En los dos casos el catálogo en memoria es el fallback: sin zonas, los avisos
+# del seed quedan con un zone_id sin ZoneRow y las rutas que hacen
+# zones[listing.zone_id] fallan con KeyError.
+_zonas_de_memoria = ZonesRepositoryMemory(store)
+if usa_postgres():
+    _zones_repo: ZonesRepository = GoldZonesRepository(fallback=_zonas_de_memoria)
+    _cargar_scraped = filas_de_market_listings
+else:
+    _zones_repo = WarehouseZonesRepository(fallback=_zonas_de_memoria)
+    _cargar_scraped = filas_del_warehouse
+
 _catalog_repo = CatalogRepositoryMemory(store)
-_listings_repo: ListingsRepository = ListingsRepositoryBlended(ListingsRepositoryMemory(store))
+_listings_repo: ListingsRepository = ListingsRepositoryBlended(
+    ListingsRepositoryMemory(store), cargar_filas=_cargar_scraped
+)
 _market_snapshots_repo = MarketSnapshotsRepositoryMemory(store)
 _inquiries_repo: InquiriesRepository = InquiriesRepositorySql()
 _favorites_repo: FavoritesRepository = FavoritesRepositorySql()

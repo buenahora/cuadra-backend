@@ -20,6 +20,7 @@ existe, no se puede editar.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime, timezone
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -29,11 +30,19 @@ from app.repositories.memory.repo import ListingsRepositoryMemory
 from app.repositories.models import ListingRow, PhotoRow
 from app.repositories.warehouse.connection import get_warehouse_connection
 
-_LISTINGS_QUERY = """
-    select listing_id, fuente_datos, barrio, zone_id, direccion, latitud,
-           longitud, dormitorios, banos, metraje_m2, precio, estado,
-           es_activo, publicado_en, descripcion, amenities, fotos,
-           ingestado_en
+# Las columnas que espera _row_to_listing, en orden. El FROM cambia según el
+# motor (main.market_listings en DuckDB, market_listings en Postgres) pero la
+# lista y el orden son los mismos: es el contrato entre esta función de mapeo y
+# las dos fuentes.
+COLUMNAS_LISTINGS = """
+    listing_id, fuente_datos, barrio, zone_id, direccion, latitud,
+    longitud, dormitorios, banos, metraje_m2, precio, estado,
+    es_activo, publicado_en, descripcion, amenities, fotos,
+    ingestado_en
+"""
+
+_LISTINGS_QUERY = f"""
+    select {COLUMNAS_LISTINGS}
     from main.market_listings
     where precio is not null
 """
@@ -156,21 +165,40 @@ def _row_to_listing(row: tuple) -> ListingRow:
     )
 
 
+def filas_del_warehouse() -> list[tuple]:
+    """Los avisos scrapeados tal como los deja dbt en el warehouse DuckDB de
+    data_layer. Es la fuente de desarrollo: en AWS no hay DuckDB ni corre
+    dbt, y las filas salen de Postgres (ver app/repositories/sql/gold.py)."""
+    con = get_warehouse_connection()
+    if con is None:
+        return []
+    return con.execute(_LISTINGS_QUERY).fetchall()
+
+
 class ListingsRepositoryBlended:
-    def __init__(self, memory_repo: ListingsRepositoryMemory) -> None:
+    """Mezcla los avisos publicados en Cuadra con los scrapeados.
+
+    De dónde salen los scrapeados se inyecta (`cargar_filas`) porque cambia
+    según el entorno: DuckDB en desarrollo, Postgres en AWS. Las filas llegan
+    con las mismas columnas en el mismo orden en los dos casos -- la tabla
+    market_listings que construye el job de Glue se armó para eso -- así que
+    el mapeo a ListingRow es uno solo.
+    """
+
+    def __init__(
+        self,
+        memory_repo: ListingsRepositoryMemory,
+        cargar_filas: Callable[[], list[tuple]] = filas_del_warehouse,
+    ) -> None:
         self._memory_repo = memory_repo
+        self._cargar_filas = cargar_filas
         self._scraped: dict[UUID, ListingRow] | None = None
 
     def _load_scraped(self) -> dict[UUID, ListingRow]:
         if self._scraped is not None:
             return self._scraped
-        con = get_warehouse_connection()
-        if con is None:
-            self._scraped = {}
-            return self._scraped
-        rows = con.execute(_LISTINGS_QUERY).fetchall()
         listings = {}
-        for row in rows:
+        for row in self._cargar_filas():
             listing = _row_to_listing(row)
             listings[listing.id] = listing
         self._scraped = listings
