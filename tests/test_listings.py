@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi.testclient import TestClient
 
 
@@ -37,10 +39,20 @@ def test_get_missing_listing_404(client: TestClient) -> None:
 def test_only_owner_can_update_or_delete(
     client: TestClient, created_listing: dict
 ) -> None:
+    # Email único por corrida, igual que la fixture auth_headers de
+    # conftest.py: con un email fijo, el registro devuelve 400 en cualquier
+    # máquina donde app/data/cuadra.sqlite ya tenga esa cuenta de una corrida
+    # anterior (la base operacional persiste entre corridas, a propósito), y
+    # el test fallaba con KeyError: 'access_token' en vez de por su motivo.
     other = client.post(
         "/auth/register",
-        json={"nombre_completo": "Otro User", "email": "otro-owner-test@cuadra.uy", "password": "correcta123"},
+        json={
+            "nombre_completo": "Otro User",
+            "email": f"otro-owner-{uuid.uuid4().hex[:10]}@cuadra.uy",
+            "password": "correcta123",
+        },
     )
+    assert other.status_code == 201, other.text
     other_headers = {"Authorization": f"Bearer {other.json()['access_token']}"}
     listing_id = created_listing["id"]
 
