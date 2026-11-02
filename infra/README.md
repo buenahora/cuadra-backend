@@ -47,6 +47,8 @@ usando OIDC (sin claves) y despliegan con
 | `AWS_DEPLOY_ROLE_ARN` | los tres | outputs del stack base: `FrontendDeployRoleArn` / `BackendDeployRoleArn` / `PipelineDeployRoleArn` |
 | `CFN_EXEC_ROLE_ARN` | los tres | output `CfnExecutionRoleArn` del stack base |
 | `AWS_BASE_DEPLOY_ROLE_ARN` | backend | rol de OIDC con permisos de admin, para el workflow "Deploy base" (ver abajo) |
+| `GOOGLE_CLIENT_ID` | backend | Client ID del cliente OAuth de Google Cloud, para el login con Google. Vacío = el user pool queda sin el proveedor Google |
+| `GOOGLE_CLIENT_SECRET` | backend | Client secret del mismo cliente OAuth |
 | `VITE_CARTO_API_KEY` | frontend | key de [CARTO basemaps](https://carto.com/basemaps) para los tiles del mapa. Sin ella CARTO responde 200 pero manda una imagen que dice "API KEY REQUIRED" y el mapa se ve roto. Es una key de frontend (queda visible en el bundle): restringila por dominio en el panel de CARTO |
 
 **Variables** (misma pantalla → Variables)
@@ -59,6 +61,10 @@ usando OIDC (sin claves) y despliegan con
 | `ORIGIN_CERTIFICATE_ARN` | backend | — (opcional) | certificado ACM de `origin.<dominio>` para el ALB. **Vacío = el ALB escucha en 80 sin TLS**, ver "Sin dominio todavía" |
 | `INSTANCE_TYPE` | backend | `t3.micro` | opcional |
 | `SITE_DOMAIN_NAME` | frontend | — | dominio público, por ejemplo `www.<dominio>` |
+| `AUTH_CALLBACK_URLS` | backend | `http://localhost:5173/` | URLs a las que Cognito vuelve después del login, separadas por coma. **La raíz del sitio, no un path** (ver abajo) |
+| `AUTH_LOGOUT_URLS` | backend | `http://localhost:5173/` | ídem para el logout |
+| `AUTH_DOMAIN_PREFIX` | backend | `<Project>-<Environment>-auth` | prefijo del dominio de Cognito. Es único en toda la región, no solo en la cuenta |
+| `ENABLE_COGNITO_AUTH` | backend | `false` | `true` = la API solo acepta ID tokens de Cognito y apaga el login con contraseña |
 | `ORIGIN_DOMAIN_NAME` | frontend | — | `origin.<dominio>` (el CNAME al ALB) |
 | `SITE_CERTIFICATE_ARN` | frontend | — | certificado ACM de `SITE_DOMAIN_NAME`, en us-east-1 |
 | `SCHEDULE_EXPRESSION` | data | `cron(0 6 ? * MON *)` | opcional, cuándo corre el pipeline |
@@ -256,3 +262,47 @@ tiene que cumplir una fuente nueva está en `cuadra-data/infra/README.md`.
   archivos.
 - Pendientes conocidos del split, todavía sin resolver: ver
   `PENDIENTES.md` en la raíz de la carpeta `Cuadra/`.
+
+
+## Login con Cognito y Google
+
+El user pool existía desde el principio pero estaba vacío y desconectado: el
+login real era propio (bcrypt en la tabla `users` y un JWT firmado por la
+API). El 2026-11-02 se cableó de verdad.
+
+**El corte es de un solo sentido.** En cuanto la API recibe el pool deja de
+aceptar su propio JWT, `/auth/register` y `/auth/login` responden 404 y toda
+sesión abierta se cae. Por eso va detrás de `ENABLE_COGNITO_AUTH`, que
+arranca en `false`: con `false` el dominio y el proveedor de Google se crean
+sin tocar el login que está funcionando.
+
+Orden para encenderlo:
+
+1. **Desplegar el backend** sin `GOOGLE_CLIENT_ID`. Crea el dominio del
+   hosted UI. El output `GoogleRedirectUri` del stack es la URI que hay que
+   pegar en Google.
+2. **Crear el cliente OAuth** en Google Cloud (APIs & Services → Credentials
+   → OAuth client ID → Web application) y pegar en *Authorized redirect
+   URIs* el valor de `GoogleRedirectUri`
+   (`https://<dominio>/oauth2/idpresponse`). Guardar el client ID y el secret
+   como secrets del repo del backend.
+3. **Desplegar el backend otra vez.** Ahora sí crea el proveedor Google
+   dentro del pool.
+4. **Poner `ENABLE_COGNITO_AUTH=true`** y desplegar backend y frontend. Recién
+   acá cambia el login: la API empieza a exigir tokens de Cognito y el
+   frontend manda al hosted UI.
+
+**Las URLs de callback entran como variable y no se leen del stack del
+frontend**: el dominio de CloudFront lo crea ese stack, que depende de este,
+así que referenciarlo sería un ciclo en CloudFormation.
+
+**Tiene que ser la raíz del sitio** (`https://.../`), no `/auth/callback`: la
+app rutea por hash y CloudFront no tiene `CustomErrorResponses`, así que
+cualquier otro path devolvería un 404 de S3 antes de que cargue nada.
+Cognito manda el código como query string y lo levanta `procesarCallback()`
+al arrancar la app (ver `cuadra-frontend/src/lib/cognito.js`).
+
+**El nombre de CloudFront cambia cada vez que se recrea el stack del
+frontend.** Cuando pase, hay que actualizar `AUTH_CALLBACK_URLS` y
+`AUTH_LOGOUT_URLS` y volver a desplegar el backend, o el login corta con
+`redirect_mismatch`.
