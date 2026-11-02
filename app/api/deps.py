@@ -15,6 +15,7 @@ from __future__ import annotations
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 
+from app.core import cognito
 from app.core.security import decode_access_token
 from app.repositories.base import (
     FavoritesRepository,
@@ -123,16 +124,72 @@ _credentials_exception = HTTPException(
 )
 
 
+def _usuario_de_cognito(token: str, users_repo: UsersRepository) -> UserRow | None:
+    """Resuelve el ID token de Cognito a una fila de `users`, creándola la
+    primera vez que la persona entra.
+
+    El pool es la autoridad de identidad: acá no se valida contraseña ni se
+    confirma email, solo se guarda a quién corresponde cada `sub` para poder
+    colgarle favoritos, consultas e informes.
+
+    Se busca primero por `sub` y después por email, en ese orden. Al revés,
+    alguien que cambia su email en Google se convertiría en un usuario nuevo
+    y perdería todo lo suyo. El rescate por email existe para el caso
+    contrario: una cuenta vieja con contraseña que entra por Google por
+    primera vez -- sin eso el INSERT chocaría contra el UNIQUE de email.
+    """
+    claims = cognito.verificar_id_token(token)
+    if claims is None:
+        return None
+    sub = claims.get("sub")
+    if not sub:
+        return None
+
+    user = users_repo.get_by_cognito_sub(sub)
+    if user is not None:
+        return user
+
+    email = (claims.get("email") or "").lower()
+    if not email:
+        # Sin email no hay cómo identificar ni contactar a la persona. El pool
+        # pide email como nombre de usuario, así que esto no debería pasar.
+        return None
+
+    existente = users_repo.get_by_email(email)
+    if existente is not None:
+        users_repo.vincular_cognito(existente.id, sub)
+        return users_repo.get_by_id(existente.id)
+
+    return users_repo.create(
+        nombre_completo=claims.get("name") or email.split("@")[0],
+        email=email,
+        telefono=None,
+        password_hash=None,  # la contraseña, si existe, vive en Cognito
+        cognito_sub=sub,
+    )
+
+
+def _resolver_usuario(token: str, users_repo: UsersRepository) -> UserRow | None:
+    """Un solo lugar donde se decide qué es un token válido.
+
+    Con el pool configurado (AWS) se aceptan únicamente ID tokens de Cognito.
+    No se cae al JWT propio como respaldo a propósito: dejar los dos caminos
+    abiertos es dejar abierto el de las contraseñas viejas, que es
+    justamente lo que se está retirando.
+    """
+    if cognito.esta_configurado():
+        return _usuario_de_cognito(token, users_repo)
+    user_id = decode_access_token(token)
+    return users_repo.get_by_id(user_id) if user_id else None
+
+
 def get_current_user(
     token: str | None = Depends(_oauth2_scheme),
     users_repo: UsersRepository = Depends(get_users_repo),
 ) -> UserRow:
     if token is None:
         raise _credentials_exception
-    user_id = decode_access_token(token)
-    if user_id is None:
-        raise _credentials_exception
-    user = users_repo.get_by_id(user_id)
+    user = _resolver_usuario(token, users_repo)
     if user is None:
         raise _credentials_exception
     return user
@@ -144,7 +201,4 @@ def get_current_user_optional(
 ) -> UserRow | None:
     if token is None:
         return None
-    user_id = decode_access_token(token)
-    if user_id is None:
-        return None
-    return users_repo.get_by_id(user_id)
+    return _resolver_usuario(token, users_repo)

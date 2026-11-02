@@ -19,9 +19,11 @@ class UserRow:
     nombre_completo: str
     email: str
     telefono: str | None
-    password_hash: str
+    # None para quien entró por Cognito: nunca hubo contraseña nuestra.
+    password_hash: str | None
     es_corredor: bool
     google_id: str | None
+    cognito_sub: str | None
     creado_en: datetime
 
 

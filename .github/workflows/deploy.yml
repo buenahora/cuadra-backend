@@ -186,7 +186,13 @@ jobs:
               ${{ vars.DB_BACKUP_RETENTION_DAYS && format('DbBackupRetentionDays={0}', vars.DB_BACKUP_RETENTION_DAYS) || '' }} \
               ${{ vars.DB_DELETION_PROTECTION && format('DbDeletionProtection={0}', vars.DB_DELETION_PROTECTION) || '' }} \
               ${{ vars.ORIGIN_CERTIFICATE_ARN && format('OriginCertificateArn={0}', vars.ORIGIN_CERTIFICATE_ARN) || '' }} \
-              ${{ vars.INSTANCE_TYPE && format('InstanceType={0}', vars.INSTANCE_TYPE) || '' }}
+              ${{ vars.INSTANCE_TYPE && format('InstanceType={0}', vars.INSTANCE_TYPE) || '' }} \
+              ${{ vars.AUTH_DOMAIN_PREFIX && format('AuthDomainPrefix={0}', vars.AUTH_DOMAIN_PREFIX) || '' }} \
+              ${{ vars.AUTH_CALLBACK_URLS && format('AuthCallbackUrls="{0}"', vars.AUTH_CALLBACK_URLS) || '' }} \
+              ${{ vars.AUTH_LOGOUT_URLS && format('AuthLogoutUrls="{0}"', vars.AUTH_LOGOUT_URLS) || '' }} \
+              ${{ vars.ENABLE_COGNITO_AUTH && format('EnableCognitoAuth={0}', vars.ENABLE_COGNITO_AUTH) || '' }} \
+              ${{ secrets.GOOGLE_CLIENT_ID && format('GoogleClientId={0}', secrets.GOOGLE_CLIENT_ID) || '' }} \
+              ${{ secrets.GOOGLE_CLIENT_SECRET && format('GoogleClientSecret={0}', secrets.GOOGLE_CLIENT_SECRET) || '' }}
 
       # El cambio de AMI en el launch template no reemplaza las instancias que
       # ya están corriendo: eso lo hace el instance refresh.

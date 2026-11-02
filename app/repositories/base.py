@@ -32,13 +32,18 @@ class UsersRepository(Protocol):
         nombre_completo: str,
         email: str,
         telefono: str | None,
-        password_hash: str,
+        password_hash: str | None,
         es_corredor: bool = False,
+        cognito_sub: str | None = None,
     ) -> UserRow: ...
 
     def get_by_id(self, user_id: UUID) -> UserRow | None: ...
 
     def get_by_email(self, email: str) -> UserRow | None: ...
+
+    def get_by_cognito_sub(self, cognito_sub: str) -> UserRow | None: ...
+
+    def vincular_cognito(self, user_id: UUID, cognito_sub: str) -> None: ...
 
 
 class ZonesRepository(Protocol):

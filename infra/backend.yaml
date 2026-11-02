@@ -60,9 +60,50 @@ Parameters:
     Type: Number
     Default: 100
     Description: Requests por instancia objetivo del escalado (ajustar con prueba de carga)
+  # ---- Login con Cognito ----
+  # El prefijo es único en toda la región, no solo en la cuenta: si otro ya lo
+  # tomó, el deploy falla con "Domain already associated with another user pool"
+  # y hay que elegir otro acá.
+  AuthDomainPrefix:
+    Type: String
+    Default: ''
+    Description: Prefijo del dominio de Cognito. Vacío = <Project>-<Environment>-auth
+  GoogleClientId:
+    Type: String
+    Default: ''
+    Description: Client ID del cliente OAuth de Google Cloud. Vacío = no se crea el proveedor Google y queda solo el login de Cognito
+  GoogleClientSecret:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: Client secret del mismo cliente OAuth de Google
+  # El dominio de CloudFront lo crea el stack del frontend, que depende de este:
+  # no se puede referenciar sin un ciclo. Por eso entra como parámetro, igual
+  # que OriginCertificateArn. Ver infra/README.md.
+  AuthCallbackUrls:
+    Type: CommaDelimitedList
+    Default: 'http://localhost:5173/auth/callback'
+    Description: URLs a las que Cognito puede volver después del login, separadas por coma
+  AuthLogoutUrls:
+    Type: CommaDelimitedList
+    Default: 'http://localhost:5173/'
+    Description: URLs a las que Cognito puede volver después del logout, separadas por coma
+  # El corte es de un solo sentido y rompe las sesiones abiertas: en cuanto la
+  # API recibe el pool, deja de aceptar su propio JWT y /auth/login responde
+  # 404. Va detrás de un interruptor para poder crear el dominio y el
+  # proveedor de Google sin tocar el login que está funcionando, y pasar a
+  # Cognito recién cuando el frontend sabe hacer el flujo nuevo.
+  EnableCognitoAuth:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: true = la API solo acepta ID tokens de Cognito y apaga el login con contraseña
 
 Conditions:
   ProtegerDeBorrado: !Equals [!Ref DbDeletionProtection, 'true']
+  ConGoogle: !Not [!Equals [!Ref GoogleClientId, '']]
+  ConLoginCognito: !Equals [!Ref EnableCognitoAuth, 'true']
+  DominioAuthPorDefecto: !Equals [!Ref AuthDomainPrefix, '']
   ConCertificado: !Not [!Equals [!Ref OriginCertificateArn, '']]
   SinCertificado: !Equals [!Ref OriginCertificateArn, '']
 
@@ -101,11 +142,46 @@ Resources:
       # y el stack queda en ROLLBACK_FAILED, que hay que destrabar a mano
       # desactivando la protección. Pasó el 2026-10-31.
       DeletionProtection: !If [ProtegerDeBorrado, ACTIVE, INACTIVE]
+  # Hosted UI: es la pantalla que recibe el login y el "Entrar con Google".
+  # Sin dominio no hay endpoint /authorize ni /token, y el flujo no existe.
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      Domain: !If
+        - DominioAuthPorDefecto
+        - !Sub '${Project}-${Environment}-auth'
+        - !Ref AuthDomainPrefix
+
+  # Google como proveedor federado. El `Ref` a este recurso desde
+  # SupportedIdentityProviders devuelve el ProviderName y le da a
+  # CloudFormation el orden correcto: primero el proveedor, después el client.
+  GoogleIdentityProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Condition: ConGoogle
+    Properties:
+      UserPoolId: !Ref UserPool
+      ProviderName: Google
+      ProviderType: Google
+      ProviderDetails:
+        client_id: !Ref GoogleClientId
+        client_secret: !Ref GoogleClientSecret
+        # `openid email profile`: lo mínimo para saber quién entró.
+        authorize_scopes: 'openid email profile'
+      # De los datos que manda Google a los atributos del pool. `email` es
+      # obligatorio porque el pool usa email como nombre de usuario.
+      AttributeMapping:
+        email: email
+        name: name
+        username: sub
+
   UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     Properties:
       UserPoolId: !Ref UserPool
       ClientName: !Sub '${Project}-${Environment}-web'
+      # Cliente público (SPA): no puede guardar un secreto, así que el
+      # intercambio del código por tokens va con PKCE desde el navegador.
       GenerateSecret: false
       ExplicitAuthFlows: [ALLOW_USER_SRP_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
       PreventUserExistenceErrors: ENABLED
@@ -113,6 +189,16 @@ Resources:
       IdTokenValidity: 1
       RefreshTokenValidity: 30
       TokenValidityUnits: {AccessToken: hours, IdToken: hours, RefreshToken: days}
+      # Authorization code, no implicit: el token no viaja en la URL.
+      AllowedOAuthFlows: [code]
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes: [openid, email, profile]
+      SupportedIdentityProviders: !If
+        - ConGoogle
+        - [COGNITO, !Ref GoogleIdentityProvider]
+        - [COGNITO]
+      CallbackURLs: !Ref AuthCallbackUrls
+      LogoutURLs: !Ref AuthLogoutUrls
 
   # ---------------------------------------------------------------- RDS
   DbSubnetGroup:
@@ -326,35 +412,47 @@ Resources:
         # La AMI ya trae el código y el servicio systemd. El user data solo deja la
         # configuración que depende del stack.
         UserData:
-          Fn::Base64: !Sub |
-            #!/bin/bash
-            set -euo pipefail
-            mkdir -p /etc/alquileres
-            cat > /etc/alquileres/app.env <<EOF
-            APP_ENV=production
-            # PORT y ROOT_PATH las consume la unidad de systemd como flags de
-            # uvicorn (ver packer/files/alquileres-api.service), no la app: van
-            # sin prefijo a propósito.
-            PORT=3000
-            ROOT_PATH=/api
-            # Las dos: botocore resuelve la región de AWS_DEFAULT_REGION y NO
-            # de AWS_REGION. Con solo la segunda puesta, la app moría al
-            # arrancar con NoRegionError teniendo la variable a la vista.
-            # CUADRA_AWS_REGION es la que lee Settings y la que la app pasa
-            # explícita a boto3 (app/core/secrets.py), así que es la que
-            # realmente importa; las otras dos quedan para el awscli de la
-            # máquina y para cualquier otro cliente.
-            AWS_REGION=${AWS::Region}
-            AWS_DEFAULT_REGION=${AWS::Region}
-            CUADRA_AWS_REGION=${AWS::Region}
-            # Las que lee la app necesitan el prefijo CUADRA_: es el env_prefix
-            # de Settings en app/core/config.py. Sin el prefijo se ignoran, que
-            # es lo que pasaba antes con DB_SECRET_ARN -- la API quedaba con el
-            # SQLite local de cada instancia y la RDS sin usar.
-            CUADRA_DB_SECRET_ARN=${AppDbSecret}
-            CUADRA_JWT_SECRET_ARN=${AppJwtSecret}
-            EOF
-            systemctl restart alquileres-api
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash
+              set -euo pipefail
+              mkdir -p /etc/alquileres
+              cat > /etc/alquileres/app.env <<EOF
+              APP_ENV=production
+              # PORT y ROOT_PATH las consume la unidad de systemd como flags de
+              # uvicorn (ver packer/files/alquileres-api.service), no la app: van
+              # sin prefijo a propósito.
+              PORT=3000
+              ROOT_PATH=/api
+              # Las dos: botocore resuelve la región de AWS_DEFAULT_REGION y NO
+              # de AWS_REGION. Con solo la segunda puesta, la app moría al
+              # arrancar con NoRegionError teniendo la variable a la vista.
+              # CUADRA_AWS_REGION es la que lee Settings y la que la app pasa
+              # explícita a boto3 (app/core/secrets.py), así que es la que
+              # realmente importa; las otras dos quedan para el awscli de la
+              # máquina y para cualquier otro cliente.
+              AWS_REGION=${AWS::Region}
+              AWS_DEFAULT_REGION=${AWS::Region}
+              CUADRA_AWS_REGION=${AWS::Region}
+              # Las que lee la app necesitan el prefijo CUADRA_: es el env_prefix
+              # de Settings en app/core/config.py. Sin el prefijo se ignoran, que
+              # es lo que pasaba antes con DB_SECRET_ARN -- la API quedaba con el
+              # SQLite local de cada instancia y la RDS sin usar.
+              CUADRA_DB_SECRET_ARN=${AppDbSecret}
+              CUADRA_JWT_SECRET_ARN=${AppJwtSecret}
+              # Con estas dos cargadas la API deja de aceptar su propio JWT y
+              # solo valida ID tokens del pool; /auth/register y /auth/login
+              # pasan a responder 404. Ver app/core/cognito.py. Vacías mientras
+              # EnableCognitoAuth sea false: Settings ignora una variable vacía
+              # igual que una ausente, así que sigue el login propio.
+              CUADRA_COGNITO_USER_POOL_ID=${PoolIdSiEstaPrendido}
+              CUADRA_COGNITO_CLIENT_ID=${ClientIdSiEstaPrendido}
+              EOF
+              systemctl restart alquileres-api
+            # Vacías con EnableCognitoAuth=false: así el dominio y el
+            # proveedor de Google se pueden crear sin cortar el login actual.
+            - PoolIdSiEstaPrendido: !If [ConLoginCognito, !Ref UserPool, '']
+              ClientIdSiEstaPrendido: !If [ConLoginCognito, !Ref UserPoolClient, '']
 
   # ---------------------------------------------------------------- ALB
   LoadBalancer:
@@ -537,3 +635,20 @@ Outputs:
   UserPoolClientId:
     Value: !Ref UserPoolClient
     Export: {Name: !Sub '${Project}-${Environment}-UserPoolClientId'}
+  AuthDomain:
+    Description: Dominio del hosted UI de Cognito
+    Value: !Sub
+      - '${Prefijo}.auth.${AWS::Region}.amazoncognito.com'
+      - Prefijo: !If
+          - DominioAuthPorDefecto
+          - !Sub '${Project}-${Environment}-auth'
+          - !Ref AuthDomainPrefix
+    Export: {Name: !Sub '${Project}-${Environment}-AuthDomain'}
+  GoogleRedirectUri:
+    Description: Pegar esta URI en "Authorized redirect URIs" del cliente OAuth de Google Cloud
+    Value: !Sub
+      - 'https://${Prefijo}.auth.${AWS::Region}.amazoncognito.com/oauth2/idpresponse'
+      - Prefijo: !If
+          - DominioAuthPorDefecto
+          - !Sub '${Project}-${Environment}-auth'
+          - !Ref AuthDomainPrefix

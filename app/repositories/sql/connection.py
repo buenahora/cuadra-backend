@@ -39,9 +39,15 @@ CREATE TABLE IF NOT EXISTS users (
     nombre_completo TEXT NOT NULL,
     email TEXT NOT NULL UNIQUE,
     telefono TEXT,
-    password_hash TEXT NOT NULL,
+    -- Nullable desde que el login es Cognito: a un usuario que entró con
+    -- Google nunca le conocemos una contraseña. Sigue habiendo hash para los
+    -- usuarios del login propio, que es el que corre en desarrollo.
+    password_hash TEXT,
     es_corredor INTEGER NOT NULL DEFAULT 0,
     google_id TEXT,
+    -- `sub` del usuario en el user pool. Estable y único por persona, no
+    -- cambia aunque cambie el email, así que es la llave para reencontrarlo.
+    cognito_sub TEXT,
     creado_en TEXT NOT NULL
 );
 
@@ -184,6 +190,45 @@ def get_connection() -> Iterator[Conexion]:
         conn.close()
 
 
+# Cambios sobre tablas que ya existen. `CREATE TABLE IF NOT EXISTS` no toca
+# una tabla creada antes, así que una columna nueva no llega sola a una base
+# que ya está en producción. Cada sentencia tiene que poder correr dos veces
+# sin romper: init_db() se ejecuta en cada arranque de la app.
+#
+# SQLite no entiende `ADD COLUMN IF NOT EXISTS` ni `ALTER COLUMN`, por eso se
+# consulta primero el catálogo y en SQLite el aflojar el NOT NULL se saltea
+# (las bases locales se recrean solas y no vale la pena el baile de copiar la
+# tabla entera).
+_MIGRACIONES = [
+    ("users", "cognito_sub", "ALTER TABLE users ADD COLUMN cognito_sub TEXT"),
+]
+
+
+def _columnas(conn: Any, tabla: str) -> set[str]:
+    if usa_postgres():
+        filas = conn.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+            (tabla,),
+        ).fetchall()
+        return {f["column_name"] for f in filas}
+    filas = conn.execute(f"PRAGMA table_info({tabla})").fetchall()
+    return {f["name"] for f in filas}
+
+
+def _migrar(conn: Any) -> None:
+    for tabla, columna, sentencia in _MIGRACIONES:
+        if columna not in _columnas(conn, tabla):
+            conn.execute(sentencia)
+    if usa_postgres():
+        # Idempotente: aflojar un NOT NULL que ya está flojo no hace nada.
+        conn.execute("ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL")
+    # Va acá y no en _SCHEMA: en una base que ya existía, el índice se
+    # crearía antes del ALTER de arriba y fallaría con "no such column".
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS users_cognito_sub_idx ON users (cognito_sub)"
+    )
+
+
 def init_db() -> None:
     # executescript es solo de sqlite3: se parte el esquema y se manda
     # sentencia por sentencia, que sirve para los dos motores.
@@ -191,3 +236,4 @@ def init_db() -> None:
     with get_connection() as conn:
         for sentencia in sentencias:
             conn.execute(sentencia)
+        _migrar(conn)

@@ -30,6 +30,7 @@ def _row_to_user(row: dict[str, Any]) -> UserRow:
         password_hash=row["password_hash"],
         es_corredor=bool(row["es_corredor"]),
         google_id=row["google_id"],
+        cognito_sub=row.get("cognito_sub"),
         creado_en=datetime.fromisoformat(row["creado_en"]),
     )
 
@@ -40,8 +41,9 @@ class UsersRepositorySql:
         nombre_completo: str,
         email: str,
         telefono: str | None,
-        password_hash: str,
+        password_hash: str | None,
         es_corredor: bool = False,
+        cognito_sub: str | None = None,
     ) -> UserRow:
         user = UserRow(
             id=uuid4(),
@@ -51,20 +53,42 @@ class UsersRepositorySql:
             password_hash=password_hash,
             es_corredor=es_corredor,
             google_id=None,
+            cognito_sub=cognito_sub,
             creado_en=datetime.now(timezone.utc),
         )
         with get_connection() as conn:
             conn.execute(
                 "INSERT INTO users"
-                " (id, nombre_completo, email, telefono, password_hash, es_corredor, google_id, creado_en)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " (id, nombre_completo, email, telefono, password_hash, es_corredor,"
+                "  google_id, cognito_sub, creado_en)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     str(user.id), user.nombre_completo, user.email, user.telefono,
                     user.password_hash, int(user.es_corredor), user.google_id,
-                    user.creado_en.isoformat(),
+                    user.cognito_sub, user.creado_en.isoformat(),
                 ),
             )
         return user
+
+    def get_by_cognito_sub(self, cognito_sub: str) -> UserRow | None:
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE cognito_sub = ?", (cognito_sub,)
+            ).fetchone()
+        return _row_to_user(row) if row else None
+
+    def vincular_cognito(self, user_id: UUID, cognito_sub: str) -> None:
+        """Ata una fila que ya existe al usuario del pool.
+
+        Pasa cuando alguien que ya tenía cuenta con contraseña entra por
+        primera vez con Google y el email coincide: en vez de crear un
+        duplicado (que chocaría con el UNIQUE de email) se reusa la fila.
+        """
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE users SET cognito_sub = ? WHERE id = ?",
+                (cognito_sub, str(user_id)),
+            )
 
     def get_by_id(self, user_id: UUID) -> UserRow | None:
         with get_connection() as conn:

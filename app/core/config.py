@@ -73,5 +73,17 @@ class Settings(BaseSettings):
     # (variable de entorno o metadata de la instancia).
     aws_region: str = ""
 
+    # User pool de Cognito (outputs UserPoolId / UserPoolClientId de
+    # infra/backend.yaml). Cargados = la API solo acepta ID tokens de Cognito
+    # y las rutas de registro y login con contraseña quedan apagadas; el login
+    # pasa a ser el hosted UI, con Google incluido. Vacíos = login propio con
+    # bcrypt contra la tabla users, que es lo que corre en desarrollo y en los
+    # tests. En AWS los pone el user-data como CUADRA_COGNITO_*.
+    #
+    # La región no se configura: sale del prefijo del pool id (ver
+    # app/core/cognito.py).
+    cognito_user_pool_id: str = ""
+    cognito_client_id: str = ""
+
 
 settings = Settings()
