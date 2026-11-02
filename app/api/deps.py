@@ -3,7 +3,8 @@ resuelven contra la data layer real (app/repositories/warehouse/,
 2026-08-15) combinada con el store en memoria; usuarios, favoritos,
 consultas e informes resuelven contra SQL (app/repositories/sql/,
 2026-08-15 también -- son datos que no pueden perderse en cada restart,
-a diferencia de catálogos/avisos sintéticos que se resiembran solos). Los
+a diferencia de los catálogos, que se resiembran solos; los avisos
+sintéticos del seed ya no se cargan en AWS, ver seed_all más abajo). Los
 routers solo conocen los Protocols de app/repositories/base.py, nunca las
 clases concretas -- así este es el único archivo que cambia cuando se
 agrega o cambia una fuente de datos.
@@ -47,7 +48,10 @@ from app.repositories.warehouse.listings_source import (
 from app.repositories.warehouse.zones_repo import WarehouseZonesRepository
 
 init_db()
-seed_all()
+# En AWS (Postgres) los avisos y el histórico salen de las tablas gold: el
+# seed solo aporta zonas de fallback y catálogos. Sembrar los avisos
+# sintéticos ahí los publicaba en la API real y contaminaba las medianas.
+seed_all(datos_sinteticos=not usa_postgres())
 
 _users_repo: UsersRepository = UsersRepositorySql()
 # De dónde salen los avisos scrapeados y el catálogo de zonas depende del

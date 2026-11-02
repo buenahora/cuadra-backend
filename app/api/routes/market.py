@@ -20,7 +20,16 @@ def _yoy_pct(
 ) -> float | None:
     if current_median is None:
         return None
-    history = snapshots_repo.list_seed_history(zone_id, bucket)
+    # El histórico sembrado es inventado (random.Random(777) en
+    # memory/seed.py: la mediana de hoy dividida por un factor al azar y
+    # después una deriva al alza). Publicarlo como variación interanual daba
+    # cifras como "Pocitos 1 dormitorio +25,5%" indistinguibles de un dato
+    # real. Mientras no haya doce meses de snapshots de verdad, este campo va
+    # vacío: el front ya sabe mostrar None como "sin datos suficientes".
+    history = [
+        s for s in snapshots_repo.list_seed_history(zone_id, bucket)
+        if s.fuente != "historico_semilla"
+    ]
     if not history:
         return None
     oldest = history[0]  # ya viene ordenado por periodo ascendente

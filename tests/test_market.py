@@ -79,3 +79,25 @@ def test_classify_unknown_zone_404(client: TestClient) -> None:
         json={"precio": 20000, "zone_id": "no-existe", "dormitorios_bucket": "1"},
     )
     assert resp.status_code == 404
+
+
+def test_variacion_interanual_nunca_sale_del_historico_sembrado(client: TestClient) -> None:
+    """El histórico sembrado es inventado (random.Random(777) en
+    memory/seed.py). Publicarlo como variación interanual daba cifras como
+    "Pocitos 1 dormitorio +25,5%", indistinguibles de un dato real -- estaba
+    así en producción el 2026-11-02. Mientras no haya doce meses de snapshots
+    de verdad, el campo va vacío.
+
+    Se recorren todas las zonas sembradas, no una: la combinación que tenía
+    histórico dependía de cuántos avisos en memoria caían en cada bucket, y
+    fijar una sola acá haría que el test pase por no encontrar nada.
+    """
+    zonas = [z["id"] for z in client.get("/zones").json()]
+    assert zonas, "sin zonas no se prueba nada"
+
+    for zone_id in zonas:
+        for stat in client.get("/market/stats", params={"zone_id": zone_id}).json():
+            assert stat["variacion_interanual_pct"] is None, (
+                f"{zone_id}/{stat['dormitorios_bucket']} publica "
+                f"{stat['variacion_interanual_pct']}% calculado sobre histórico inventado"
+            )

@@ -207,10 +207,27 @@ def _shift_months(d: date, delta: int) -> date:
     return date(year, month, 1)
 
 
-def seed_all() -> None:
+def seed_all(*, datos_sinteticos: bool = True) -> None:
+    """Siembra el store en memoria.
+
+    `datos_sinteticos=False` deja solo zonas y catálogos y se saltea los
+    avisos y el histórico inventados. Es lo que corresponde en AWS, donde los
+    avisos salen de las tablas gold: ahí los 72 avisos de ejemplo no eran un
+    relleno inofensivo, se servían por la API pública junto a los reales
+    (`ListingsRepositoryBlended` suma las dos fuentes) y además entraban en
+    el cálculo de las medianas de mercado, que es el veredicto del producto.
+
+    Las zonas y los catálogos sí se siembran igual: las zonas son el fallback
+    de `GoldZonesRepository` (sin ellas, un aviso con un zone_id que no está
+    en gold revienta las rutas que hacen zones[listing.zone_id]) y los
+    catálogos de amenities y garantías son datos de referencia, no datos
+    inventados -- hoy no tienen otra fuente.
+    """
     if store.zones:
         return  # ya sembrado -- idempotente (uvicorn --reload reimporta)
     _seed_zones()
     _seed_catalogs()
+    if not datos_sinteticos:
+        return
     _seed_listings()
     _seed_market_history()
