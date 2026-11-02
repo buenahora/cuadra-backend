@@ -72,9 +72,25 @@ Parameters:
     AllowedValues: ['true', 'false']
     Description: Abrir el puerto 80 del ALB (solo mientras no haya certificado)
 
+  # CloudTrail es un recurso de CUENTA, no de este proyecto: un trail multi-región
+  # graba las llamadas de la API de AWS de todo lo que vive en la cuenta, incluido
+  # lo que no es de Cuadra. La cuenta está compartida, así que esto queda detrás de
+  # un parámetro: poner 'false' si alguien más ya creó un trail, para no pagar dos
+  # veces la misma grabación (el primer trail de management events es gratis, el
+  # segundo se cobra por evento).
+  #
+  # El bucket de logs es DeletionPolicy: Retain a propósito. Si se borra este
+  # stack, la auditoría de la cuenta no se borra con él.
+  CreateCloudTrail:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Crear el trail de CloudTrail de la cuenta (false si ya existe uno)
+
 Conditions:
   CreateOidc: !Equals [!Ref CreateGitHubOidcProvider, 'true']
   PermitirAlbHttp: !Equals [!Ref AllowAlbHttp, 'true']
+  CrearCloudTrail: !Equals [!Ref CreateCloudTrail, 'true']
 
 Resources:
   # ---------------------------------------------------------------- Red
@@ -418,6 +434,76 @@ Resources:
           Subscribers: [{SubscriptionType: EMAIL, Address: !Ref AlertEmail}]
         - Notification: {NotificationType: FORECASTED, ComparisonOperator: GREATER_THAN, Threshold: 100, ThresholdType: PERCENTAGE}
           Subscribers: [{SubscriptionType: EMAIL, Address: !Ref AlertEmail}]
+
+  # ---------------------------------------------------------------- Auditoría de la cuenta
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    Condition: CrearCloudTrail
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${Project}-${Environment}-cloudtrail-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      LifecycleConfiguration:
+        Rules:
+          # Los logs se consultan casi siempre dentro de la primera semana. Después
+          # quedan por si hace falta investigar hacia atrás, cada vez más barato.
+          - Id: tiering-logs
+            Status: Enabled
+            Transitions:
+              - {StorageClass: STANDARD_IA, TransitionInDays: 30}
+              - {StorageClass: GLACIER_IR, TransitionInDays: 90}
+            ExpirationInDays: 400
+
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CrearCloudTrail
+    Properties:
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Las dos sentencias que pide CloudTrail para poder escribir. El
+          # aws:SourceArn evita que un trail de otra cuenta use este bucket.
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal: {Service: cloudtrail.amazonaws.com}
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CloudTrailBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${Project}-${Environment}-trail'
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal: {Service: cloudtrail.amazonaws.com}
+            Action: s3:PutObject
+            Resource: !Sub '${CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${Project}-${Environment}-trail'
+
+  Trail:
+    Type: AWS::CloudTrail::Trail
+    Condition: CrearCloudTrail
+    # Sin esto CloudFormation puede crear el trail antes de la policy, y
+    # CloudTrail falla porque todavía no puede escribir en el bucket.
+    DependsOn: CloudTrailBucketPolicy
+    Properties:
+      TrailName: !Sub '${Project}-${Environment}-trail'
+      S3BucketName: !Ref CloudTrailBucket
+      IsLogging: true
+      IsMultiRegionTrail: true
+      IncludeGlobalServiceEvents: true
+      # Agrega un hash por archivo para poder probar que nadie los editó.
+      EnableLogFileValidation: true
 
   # ---------------------------------------------------------------- Artefactos de CI
   ArtifactsBucket:

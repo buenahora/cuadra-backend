@@ -82,8 +82,11 @@ Parameters:
   # que OriginCertificateArn. Ver infra/README.md.
   AuthCallbackUrls:
     Type: CommaDelimitedList
-    Default: 'http://localhost:5173/auth/callback'
-    Description: URLs a las que Cognito puede volver después del login, separadas por coma
+    Default: 'http://localhost:5173/'
+    Description: >
+      URLs a las que Cognito puede volver después del login, separadas por coma. Tiene que
+      ser la raíz del sitio y no un path: la app rutea por hash y CloudFront no tiene
+      fallback de SPA, así que cualquier otro path daría 404 de S3. Ver src/lib/cognito.js
   AuthLogoutUrls:
     Type: CommaDelimitedList
     Default: 'http://localhost:5173/'
@@ -606,6 +609,92 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       AlarmActions:
         - Fn::ImportValue: !Sub '${Project}-${Environment}-AlertsTopicArn'
+
+  # ---------------------------------------------------------------- Dashboard
+  # Vista única de operación diaria: tráfico, errores y latencia del ALB,
+  # instancias del ASG, CPU y conexiones de RDS, y el estado de la última
+  # corrida del pipeline.
+  #
+  # El widget del pipeline referencia la state machine por su ARN armado a
+  # mano, no por un import: el stack del pipeline se despliega DESPUÉS de este
+  # y un Fn::ImportValue haría la dependencia circular. El nombre es el mismo
+  # !Sub que usa pipeline.yaml (StateMachineName). Si el pipeline todavía no
+  # existe, el widget queda vacío en vez de romper el deploy.
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${Project}-${Environment}'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "API - trafico y errores",
+                "region": "${AWS::Region}",
+                "view": "timeSeries", "stat": "Sum", "period": 300,
+                "metrics": [
+                  [ "AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${LoadBalancer.LoadBalancerFullName}", { "label": "requests" } ],
+                  [ ".", "HTTPCode_Target_5XX_Count", ".", ".", { "label": "5xx de la app", "color": "#d62728" } ],
+                  [ ".", "HTTPCode_ELB_5XX_Count", ".", ".", { "label": "5xx del ALB", "color": "#ff7f0e" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "API - latencia",
+                "region": "${AWS::Region}",
+                "view": "timeSeries", "period": 300,
+                "yAxis": { "left": { "label": "segundos", "showUnits": false } },
+                "metrics": [
+                  [ "AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${LoadBalancer.LoadBalancerFullName}", { "stat": "p50", "label": "p50" } ],
+                  [ "...", { "stat": "p95", "label": "p95" } ],
+                  [ "...", { "stat": "p99", "label": "p99" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "Instancias",
+                "region": "${AWS::Region}",
+                "view": "timeSeries", "period": 60,
+                "metrics": [
+                  [ "AWS/AutoScaling", "GroupInServiceInstances", "AutoScalingGroupName", "${AutoScalingGroup}", { "stat": "Average", "label": "en servicio (ASG)" } ],
+                  [ "AWS/ApplicationELB", "HealthyHostCount", "LoadBalancer", "${LoadBalancer.LoadBalancerFullName}", "TargetGroup", "${TargetGroup.TargetGroupFullName}", { "stat": "Minimum", "label": "sanas (ALB)" } ],
+                  [ ".", "UnHealthyHostCount", ".", ".", ".", ".", { "stat": "Maximum", "label": "no sanas (ALB)", "color": "#d62728" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "RDS Postgres",
+                "region": "${AWS::Region}",
+                "view": "timeSeries", "period": 300,
+                "metrics": [
+                  [ "AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${Database}", { "stat": "Average", "label": "CPU %" } ],
+                  [ ".", "DatabaseConnections", ".", ".", { "stat": "Maximum", "label": "conexiones", "yAxis": "right" } ],
+                  [ ".", "FreeableMemory", ".", ".", { "stat": "Minimum", "label": "memoria libre", "yAxis": "right", "visible": false } ]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 12, "width": 24, "height": 6,
+              "properties": {
+                "title": "Pipeline semanal - corridas",
+                "region": "${AWS::Region}",
+                "view": "timeSeries", "stat": "Sum", "period": 86400,
+                "metrics": [
+                  [ "AWS/States", "ExecutionsSucceeded", "StateMachineArn", "arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${Project}-${Environment}-corrida-semanal", { "label": "OK", "color": "#2ca02c" } ],
+                  [ ".", "ExecutionsFailed", ".", ".", { "label": "falladas", "color": "#d62728" } ],
+                  [ ".", "ExecutionsTimedOut", ".", ".", { "label": "timeout", "color": "#ff7f0e" } ]
+                ]
+              }
+            }
+          ]
+        }
 
 Outputs:
   AlbDnsName:
