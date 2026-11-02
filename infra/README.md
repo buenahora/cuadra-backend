@@ -47,6 +47,7 @@ usando OIDC (sin claves) y despliegan con
 | `AWS_DEPLOY_ROLE_ARN` | los tres | outputs del stack base: `FrontendDeployRoleArn` / `BackendDeployRoleArn` / `PipelineDeployRoleArn` |
 | `CFN_EXEC_ROLE_ARN` | los tres | output `CfnExecutionRoleArn` del stack base |
 | `AWS_BASE_DEPLOY_ROLE_ARN` | backend | rol de OIDC con permisos de admin, para el workflow "Deploy base" (ver abajo) |
+| `VITE_CARTO_API_KEY` | frontend | key de [CARTO basemaps](https://carto.com/basemaps) para los tiles del mapa. Sin ella CARTO responde 200 pero manda una imagen que dice "API KEY REQUIRED" y el mapa se ve roto. Es una key de frontend (queda visible en el bundle): restringila por dominio en el panel de CARTO |
 
 **Variables** (misma pantalla → Variables)
 
